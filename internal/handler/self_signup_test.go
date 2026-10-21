@@ -133,7 +133,7 @@ func (f *signupFixture) licences(email string) []model.License {
 	f.t.Helper()
 	var ls []model.License
 	if err := f.s.DB.NewSelect().Model(&ls).
-		Where("plan_id = ?", f.plan.ID).Where("lower(email) = lower(?)", email).
+		Where("product_id = ?", f.plan.ProductID).Where("lower(email) = lower(?)", email).
 		Scan(f.ctx); err != nil {
 		f.t.Fatalf("list licences: %v", err)
 	}
@@ -151,8 +151,9 @@ func dataField(out map[string]any, key string) any {
 	return d[key]
 }
 
-// A confirmed address gets exactly one licence on the plan; claiming
-// again signs in to the same one.
+// A confirmed address gets exactly one self sign-up licence for the
+// product; claiming again signs in to the same one, even after it has
+// moved to another plan.
 func TestSelfSignup_OneLicencePerAddress(t *testing.T) {
 	f := newSignupFixture(t, nil)
 	email := "Claim-" + f.plan.CheckoutID + "@example.com"
@@ -190,6 +191,27 @@ func TestSelfSignup_OneLicencePerAddress(t *testing.T) {
 	}
 	if n := len(f.licences(email)); n != 1 {
 		t.Fatalf("%d licences after the second claim, want 1", n)
+	}
+
+	// Upgraded to a paid plan of the same product, the licence still
+	// answers for the address: no second free one.
+	paid := &model.Plan{
+		ProductID: f.plan.ProductID, Name: "Premium", Slug: "premium-" + f.plan.CheckoutID,
+		LicenseType: "subscription", BillingInterval: "month", LicenseModel: "standard", MaxActivations: 1,
+	}
+	if err := f.s.CreatePlan(f.ctx, paid); err != nil {
+		t.Fatalf("create paid plan: %v", err)
+	}
+	if _, err := f.s.DB.NewUpdate().Model((*model.License)(nil)).Set("plan_id = ?", paid.ID).
+		Where("id = ?", l.ID).Exec(f.ctx); err != nil {
+		t.Fatalf("move licence: %v", err)
+	}
+	w, out = f.verify(email, f.code(lower), false)
+	if w.Code != http.StatusOK || dataField(out, "status") != "existing" || dataField(out, "license_id") != l.ID {
+		t.Fatalf("claim after the upgrade: %d %s", w.Code, w.Body.String())
+	}
+	if n := len(f.licences(email)); n != 1 {
+		t.Fatalf("%d licences after the upgrade and a new claim, want 1", n)
 	}
 }
 

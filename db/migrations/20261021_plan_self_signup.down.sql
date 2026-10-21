@@ -1,4 +1,4 @@
-DROP INDEX IF EXISTS licenses_self_signup_plan_email;
+DROP INDEX IF EXISTS licenses_self_signup_product_email;
 ALTER TABLE licenses DROP COLUMN IF EXISTS marketing_consent_at;
 ALTER TABLE licenses DROP COLUMN IF EXISTS marketing_consent;
 ALTER TABLE licenses DROP COLUMN IF EXISTS signup_source;

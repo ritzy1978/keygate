@@ -14,9 +14,11 @@ ALTER TABLE licenses ADD COLUMN IF NOT EXISTS signup_source TEXT NOT NULL DEFAUL
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS marketing_consent BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ;
 
--- One self sign-up licence per address per plan. The handler checks
--- first and answers with the existing licence; this is the backstop
--- for two confirmations racing each other.
-CREATE UNIQUE INDEX IF NOT EXISTS licenses_self_signup_plan_email
-    ON licenses (plan_id, lower(email))
+-- One self sign-up licence per address per product, wherever that
+-- licence has moved since: one upgraded to a paid plan keeps its
+-- source, so the address cannot come back for a second free one. The
+-- handler checks first and answers with the existing licence; this is
+-- the backstop for two confirmations racing each other.
+CREATE UNIQUE INDEX IF NOT EXISTS licenses_self_signup_product_email
+    ON licenses (product_id, lower(email))
     WHERE signup_source = 'self_signup';

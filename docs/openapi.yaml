@@ -638,8 +638,9 @@ paths:
         The key is emailed with the product's licence template; the
         response does not carry it.
 
-        One licence per address per plan: an address that already holds
-        one is signed in to it (`200`, `status: existing`). The plan's
+        One self sign-up licence per address per product: an address
+        that already holds one (on this plan, or on a plan it has moved
+        to since) is signed in to it (`200`, `status: existing`). The plan's
         `signup_daily_cap`, when set, limits new licences per UTC day.
 
         The new licence has `signup_source: self_signup`. When the plan
@@ -676,7 +677,7 @@ paths:
                       status: { type: string, enum: [created] }
                       license_id: { type: string, format: uuid }
         "200":
-          description: The address already holds a licence on the plan; session issued
+          description: The address already holds a self sign-up licence for the product; session issued
           content:
             application/json:
               schema:

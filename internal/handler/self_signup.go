@@ -116,9 +116,10 @@ func (h *AuthHandler) SignupVerify(c *gin.Context) {
 		return
 	}
 
-	// One licence per address per plan: a second claim signs in to the
-	// first instead of minting another.
-	if existing, err := h.Store.FindSelfSignupLicense(c, plan.ID, email); err == nil {
+	// One self sign-up licence per address per product: a second claim
+	// signs in to the first (on whatever plan it is now) instead of
+	// minting another.
+	if existing, err := h.Store.FindSelfSignupLicense(c, plan.ProductID, email); err == nil {
 		h.startSession(c, user)
 		response.OK(c, gin.H{"status": "existing", "license_id": existing.ID})
 		return
@@ -155,7 +156,7 @@ func (h *AuthHandler) SignupVerify(c *gin.Context) {
 		switch {
 		case errors.Is(err, store.ErrSelfSignupExists) || store.IsSelfSignupConflict(err):
 			// Another confirmation for this address committed first.
-			existing, ferr := h.Store.FindSelfSignupLicense(c, plan.ID, email)
+			existing, ferr := h.Store.FindSelfSignupLicense(c, plan.ProductID, email)
 			if ferr != nil {
 				response.Internal(c, ferr)
 				return
