@@ -534,7 +534,7 @@ const zh = {
   "signup.createdTitle": "您的许可证已发送",
   "signup.createdBody": "许可证密钥已发送至 {email}，您也可以在账户中查看。",
   "signup.existingTitle": "您已拥有此许可证",
-  "signup.existingBody": "{email} 已拥有此套餐的许可证，可在您的账户中查看。",
+  "signup.existingBody": "{email} 已拥有此产品的许可证，可在您的账户中查看。",
   "signup.openAccount": "打开我的账户",
 
   // Portal

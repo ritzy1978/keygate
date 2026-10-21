@@ -549,7 +549,7 @@ const en = {
   "signup.createdTitle": "Your license is on its way",
   "signup.createdBody": "We've emailed your license key to {email}. It's also in your account.",
   "signup.existingTitle": "You already have this license",
-  "signup.existingBody": "{email} already has a license on this plan. You'll find it in your account.",
+  "signup.existingBody": "{email} already has a license for this product. You'll find it in your account.",
   "signup.openAccount": "Open my account",
 
   // Portal
