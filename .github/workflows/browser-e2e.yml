@@ -1,0 +1,71 @@
+# Fork-only browser walk-through for the self sign-up / upgrade PRs.
+# Lives on the e2e/browser-test branch; not part of any upstream PR.
+name: Browser e2e (fork only)
+
+on:
+  push:
+    branches: [e2e/browser-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: keygate
+          POSTGRES_PASSWORD: keygate
+          POSTGRES_DB: keygate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t keygate-e2e .
+
+      - name: Start Keygate
+        run: |
+          docker run -d --name kg --network host \
+            -e ENVIRONMENT=development -e PORT=9000 -e BASE_URL=http://localhost:9000 \
+            -e DATABASE_URL='postgres://keygate:keygate@localhost:5432/keygate?sslmode=disable' \
+            -e JWT_SECRET="$(openssl rand -hex 16)" \
+            -e LICENSE_SIGNING_KEY="$(openssl rand -hex 32)" \
+            -e STRIPE_WEBHOOK_SECRET=whsec_e2e \
+            -e ADMIN_EMAILS=admin@example.com \
+            keygate-e2e
+          for i in $(seq 60); do curl -fs http://localhost:9000/health && exit 0; sleep 2; done
+          docker logs kg; exit 1
+
+      - name: Install Playwright
+        run: |
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.48.2
+          npx playwright install --with-deps chromium
+
+      # Copied next to its node_modules so the ESM import resolves;
+      # screenshots land in ./e2e-shots (the working directory).
+      - name: Walk through sign-up and upgrade
+        run: cp e2e/browser.mjs /tmp/pw/ && node /tmp/pw/browser.mjs
+
+      - name: Collect output
+        if: always()
+        run: |
+          mkdir -p e2e-shots
+          docker logs kg > e2e-shots/keygate.log 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-e2e
+          path: e2e-shots
