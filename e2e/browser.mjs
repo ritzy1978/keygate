@@ -123,7 +123,9 @@ try {
   try {
     // Row actions: copy link, edit, delete.
     await adminPage.getByRole("row", { name: /Community/ }).getByRole("button").nth(1).click()
-    await adminPage.getByText("Self sign-up").first().waitFor({ timeout: 5000 })
+    const section = adminPage.getByText("Self sign-up", { exact: true })
+    await section.waitFor({ timeout: 5000 })
+    await section.scrollIntoViewIfNeeded()
     await shot(adminPage, "02-admin-plan-self-signup-settings")
     await adminPage.keyboard.press("Escape")
   } catch (e) {
