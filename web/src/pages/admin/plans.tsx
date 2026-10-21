@@ -342,6 +342,9 @@ function PlanDialog({
     updates_days: plan?.updates_days ?? 0,
     renewal_days: plan?.renewal_days ?? 0,
     stripe_renewal_price_id: plan?.stripe_renewal_price_id || "",
+    self_signup: plan?.self_signup ?? false,
+    signup_daily_cap: plan?.signup_daily_cap ?? 0,
+    signup_consent_text: plan?.signup_consent_text || "",
   })
 
   const set = (key: string, val: string | number | boolean) => setForm((f) => ({ ...f, [key]: val }))
@@ -389,6 +392,11 @@ function PlanDialog({
     }
     if (!supports.seats) {
       payload.max_seats = 0
+    }
+    // Self sign-up hands licences out for free; the server refuses it
+    // on a priced plan, so a price set here switches it off.
+    if (form.stripe_price_id.trim()) {
+      payload.self_signup = false
     }
     onSubmit(payload)
   }
@@ -578,6 +586,47 @@ function PlanDialog({
                   placeholder="price_..."
                 />
               </div>
+              {/* Self sign-up: free plans only. The /pay link becomes a
+                form where visitors confirm their email to get a key. */}
+              {!form.stripe_price_id.trim() && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={form.self_signup}
+                      onChange={(e) => set("self_signup", e.target.checked)}
+                      className="h-4 w-4 rounded border-input accent-primary"
+                      id="plan-self-signup"
+                    />
+                    <Label htmlFor="plan-self-signup">{t("plans.selfSignup")}</Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("plans.selfSignupHint")}</p>
+                </div>
+              )}
+              {!form.stripe_price_id.trim() && form.self_signup && (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t("plans.signupDailyCap")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100000}
+                      value={form.signup_daily_cap}
+                      onChange={(e) => set("signup_daily_cap", Number(e.target.value))}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.signupDailyCapHint")}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.signupConsentText")}</Label>
+                    <Input
+                      value={form.signup_consent_text}
+                      maxLength={500}
+                      onChange={(e) => set("signup_consent_text", e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.signupConsentTextHint")}</p>
+                  </div>
+                </>
+              )}
               {/* Maintenance period: the license never expires, but only
                 releases published before updates_until can be installed.
                 The server clears these on non-perpetual plans. */}

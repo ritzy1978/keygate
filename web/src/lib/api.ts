@@ -56,7 +56,10 @@ async function request<T>(path: string, opts?: RequestInit, retried = false): Pr
   // is the exception: it needs a live session to revoke the refresh
   // token, and if it fails the login page would silently renew the
   // session and sign the user straight back in.
-  const renewable = !path.startsWith("/auth/") || path === "/auth/logout"
+  // The sign-up form answers 401 for a wrong code, not for a session: it
+  // keeps its own error and is never renewed or sent to the login page.
+  const signup = path.startsWith("/signup/")
+  const renewable = (!path.startsWith("/auth/") && !signup) || path === "/auth/logout"
   if (res.status === 401 && !retried && renewable) {
     const outcome = await refreshSession()
     if (outcome === "ok") return request<T>(path, opts, true)
@@ -67,7 +70,7 @@ async function request<T>(path: string, opts?: RequestInit, retried = false): Pr
   }
 
   // Could not renew: redirect to login
-  if (res.status === 401) {
+  if (res.status === 401 && !signup) {
     // Don't redirect if already on login page or fetching auth state
     if (!window.location.pathname.startsWith("/login") && path !== "/portal/me") {
       window.location.href = "/login"
@@ -154,6 +157,29 @@ export const auth = {
     post<{ status: string; email: string; name: string; is_admin: boolean; role: string }>("/auth/otp/verify", {
       email,
       code,
+    }),
+}
+
+// ─── Self sign-up (public) ───
+// A free plan's /pay link leads to /signup/:checkoutId when the plan
+// takes self sign-ups. verify signs the visitor in and emails the key.
+export interface SignupInfo {
+  product_name: string
+  plan_name: string
+  license_type: string
+  trial_days: number
+  consent_text: string
+}
+
+export const signup = {
+  info: (checkoutId: string) => get<SignupInfo>(`/signup/${encodeURIComponent(checkoutId)}`),
+  send: (checkoutId: string, email: string) =>
+    post<{ status: string }>(`/signup/${encodeURIComponent(checkoutId)}/send`, { email }),
+  verify: (checkoutId: string, email: string, code: string, marketingConsent: boolean) =>
+    post<{ status: "created" | "existing"; license_id: string }>(`/signup/${encodeURIComponent(checkoutId)}/verify`, {
+      email,
+      code,
+      marketing_consent: marketingConsent,
     }),
 }
 
@@ -629,6 +655,11 @@ export interface Plan {
   license_model?: string
   floating_timeout?: number
   token_ttl_days?: number
+  // Self sign-up (free plans only): visitors claim a licence from the
+  // plan's /pay link by confirming their email.
+  self_signup?: boolean
+  signup_daily_cap?: number
+  signup_consent_text?: string
   max_seats: number
   trial_days: number
   grace_days: number

@@ -61,9 +61,10 @@ func setSecureCookie(c *gin.Context, name, value string, maxAge int, path string
 }
 
 type AuthHandler struct {
-	Store  *store.Store
-	Config *config.Config
-	Email  *service.EmailService
+	Store   *store.Store
+	Config  *config.Config
+	Email   *service.EmailService
+	Webhook *service.WebhookService
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {

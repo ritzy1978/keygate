@@ -29,7 +29,14 @@ func (h *AuthHandler) OTPSend(c *gin.Context) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(req.Email))
+	h.sendCode(c, email, true)
+}
 
+// sendCode mails email a login code and writes the response. gated
+// applies the signup_mode gate; self sign-up passes false, because
+// claiming a licence on a plan the operator opened is itself the
+// sign-up that gate is about.
+func (h *AuthHandler) sendCode(c *gin.Context, email string, gated bool) {
 	// Rate limit: max 3 OTP requests per email per 10 minutes
 	count, err := h.Store.CountRecentOTPCodes(c, email)
 	if err != nil {
@@ -41,7 +48,7 @@ func (h *AuthHandler) OTPSend(c *gin.Context) {
 		return
 	}
 
-	allowed := h.signupAllowed(c, email)
+	allowed := !gated || h.signupAllowed(c, email)
 
 	code := generateOTPCode()
 	codeHash := hashOTPCode(code)
@@ -115,8 +122,39 @@ func (h *AuthHandler) OTPVerify(c *gin.Context) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	code := strings.TrimSpace(req.Code)
+	if !h.checkCode(c, email, strings.TrimSpace(req.Code)) {
+		return
+	}
 
+	// Gate the creating half as well. A code minted before the operator
+	// switched the setting on would otherwise still mint an account.
+	if !h.signupAllowed(c, email) {
+		response.Unauthorized(c, "invalid or expired code")
+		return
+	}
+
+	user, err := h.loginUser(c, email)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+
+	// Welcome email for new users
+	if h.Email != nil && time.Since(user.CreatedAt) < time.Minute {
+		h.Email.SendWelcome(user.Email, user.Name)
+	}
+
+	h.startSession(c, user)
+
+	response.OK(c, gin.H{
+		"status": "ok", "email": user.Email, "name": user.Name,
+		"is_admin": user.IsAdmin(), "role": user.Role,
+	})
+}
+
+// checkCode checks code against the newest valid code mailed to email
+// and uses it up. On failure it writes the 401 and returns false.
+func (h *AuthHandler) checkCode(c *gin.Context, email, code string) bool {
 	otp, err := h.Store.FindLatestValidOTPCode(c, email)
 
 	// Always perform hash comparison to prevent timing-based email enumeration
@@ -144,55 +182,49 @@ func (h *AuthHandler) OTPVerify(c *gin.Context) {
 		} else {
 			response.Unauthorized(c, "invalid or expired code")
 		}
-		return
+		return false
 	}
 
-	if err := h.Store.MarkOTPUsed(c, otpID); err != nil {
-		slog.Warn("failed to mark OTP used", "id", otpID, "error", err)
-	}
-
-	// Gate the creating half as well. A code minted before the operator
-	// switched the setting on would otherwise still mint an account.
-	if !h.signupAllowed(c, email) {
-		response.Unauthorized(c, "invalid or expired code")
-		return
-	}
-
-	// Upsert user (create on first login)
-	user := &model.User{Email: email}
-	if err := h.Store.UpsertUser(c, user); err != nil {
-		response.Internal(c, err)
-		return
-	}
-	user, err = h.Store.FindUserByEmail(c, email)
+	// Two requests carrying the same code both get past the compare
+	// above; only the one that flips the row to used goes on.
+	consumed, err := h.Store.ConsumeOTPCode(c, otpID)
 	if err != nil {
 		response.Internal(c, err)
-		return
+		return false
 	}
+	if !consumed {
+		response.Unauthorized(c, "invalid or expired code")
+		return false
+	}
+	return true
+}
 
-	// Auto-promote if email is in ADMIN_EMAILS
+// loginUser returns the account for email, creating it on first login
+// and promoting it when the address is in ADMIN_EMAILS.
+func (h *AuthHandler) loginUser(c *gin.Context, email string) (*model.User, error) {
+	if err := h.Store.UpsertUser(c, &model.User{Email: email}); err != nil {
+		return nil, err
+	}
+	user, err := h.Store.FindUserByEmail(c, email)
+	if err != nil {
+		return nil, err
+	}
 	if h.Config.IsAdminEmail(user.Email) && user.Role == model.RoleUser {
 		if role, err := h.Store.PromoteAdminEmail(c, user.ID); err == nil {
 			user.Role = role
 		}
 	}
+	return user, nil
+}
 
-	// Welcome email for new users
-	if h.Email != nil && time.Since(user.CreatedAt) < time.Minute {
-		h.Email.SendWelcome(user.Email, user.Name)
-	}
-
+// startSession signs user in after a code login and records it.
+func (h *AuthHandler) startSession(c *gin.Context, user *model.User) {
 	h.issueSession(c, user)
 
 	h.Store.Audit(c, &model.AuditLog{
 		Entity: "session", EntityID: user.ID, Action: "login",
 		ActorType: "otp", ActorID: user.ID, IPAddress: c.ClientIP(),
 		Changes: map[string]any{"email": user.Email},
-	})
-
-	response.OK(c, gin.H{
-		"status": "ok", "email": user.Email, "name": user.Name,
-		"is_admin": user.IsAdmin(), "role": user.Role,
 	})
 }
 

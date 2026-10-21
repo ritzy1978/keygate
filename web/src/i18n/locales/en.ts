@@ -113,6 +113,13 @@ const en = {
   "plans.floatingTimeout": "Floating Timeout (minutes)",
   "plans.tokenTtlDays": "Check-in Interval (days)",
   "plans.tokenTtlDaysHint": "How long a device can stay offline before it must verify again. 0 = default (7 days).",
+  "plans.selfSignup": "Self sign-up",
+  "plans.selfSignupHint":
+    "Visitors claim a free license from this plan's link by confirming their email. Only for plans without a Stripe price or update period.",
+  "plans.signupDailyCap": "Daily sign-up limit",
+  "plans.signupDailyCapHint": "New licenses per day (UTC). 0 = no limit.",
+  "plans.signupConsentText": "Marketing consent checkbox",
+  "plans.signupConsentTextHint": "Label of an optional checkbox on the sign-up form. Leave empty for none.",
   "plans.hintDesktop": "Desktop product — supports activations + auto-update feeds. Seats are disabled.",
   "plans.hintSaas": "SaaS product — supports seats and usage. Activations and release feeds are disabled.",
   "plans.hintHybrid": "Hybrid product — activations, seats, and release feeds are all available.",
@@ -532,6 +539,17 @@ const en = {
   "checkout.viewLicense": "View my license",
   "checkout.renewalSuccess": "Your update period has been extended.",
   "checkout.backToPortal": "Back to my licenses",
+
+  // Self sign-up
+  "signup.subtitle": "Get a free {product} license. Confirm your email and we'll send you the key.",
+  "signup.unavailable": "Sign-up isn't available for this plan.",
+  "signup.sendCode": "Send confirmation code",
+  "signup.claim": "Get my license",
+  "signup.createdTitle": "Your license is on its way",
+  "signup.createdBody": "We've emailed your license key to {email}. It's also in your account.",
+  "signup.existingTitle": "You already have this license",
+  "signup.existingBody": "{email} already has a license on this plan. You'll find it in your account.",
+  "signup.openAccount": "Open my account",
 
   // Portal
   "portal.myLicenses": "My Licenses",

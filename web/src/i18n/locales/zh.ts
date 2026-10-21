@@ -112,6 +112,12 @@ const zh = {
   "plans.floatingTimeout": "浮动会话超时 (分钟)",
   "plans.tokenTtlDays": "签到间隔 (天)",
   "plans.tokenTtlDaysHint": "设备离线多久后必须重新验证。0 = 默认 (7 天)。",
+  "plans.selfSignup": "自助注册",
+  "plans.selfSignupHint": "访客通过此套餐链接确认邮箱即可领取免费许可证。仅适用于没有 Stripe 价格和更新期的套餐。",
+  "plans.signupDailyCap": "每日注册上限",
+  "plans.signupDailyCapHint": "每天 (UTC) 新增的许可证数量。0 = 不限。",
+  "plans.signupConsentText": "营销同意复选框",
+  "plans.signupConsentTextHint": "注册表单上可选复选框的文字。留空则不显示。",
   "plans.hintDesktop": "桌面产品 — 支持设备激活 + 自动更新 feed,席位字段已隐藏。",
   "plans.hintSaas": "SaaS 产品 — 支持席位与用量计量,激活和 release feed 已隐藏。",
   "plans.hintHybrid": "混合产品 — 激活、席位、自动更新 feed 全部可用。",
@@ -518,6 +524,17 @@ const zh = {
   "checkout.viewLicense": "查看我的许可证",
   "checkout.renewalSuccess": "更新期已延长。",
   "checkout.backToPortal": "返回我的许可证",
+
+  // Self sign-up
+  "signup.subtitle": "免费获取 {product} 许可证。确认您的邮箱后，我们会将密钥发送给您。",
+  "signup.unavailable": "此套餐不支持自助注册。",
+  "signup.sendCode": "发送确认码",
+  "signup.claim": "获取许可证",
+  "signup.createdTitle": "您的许可证已发送",
+  "signup.createdBody": "许可证密钥已发送至 {email}，您也可以在账户中查看。",
+  "signup.existingTitle": "您已拥有此许可证",
+  "signup.existingBody": "{email} 已拥有此套餐的许可证，可在您的账户中查看。",
+  "signup.openAccount": "打开我的账户",
 
   // Portal
   "portal.myLicenses": "我的许可证",

@@ -258,11 +258,19 @@ type Plan struct {
 	FloatingTimeout      int    `bun:",notnull" json:"floating_timeout"`
 	// TokenTTLDays is how long a signed token may be used offline
 	// before the client must verify again. 0 = server default.
-	TokenTTLDays int       `bun:",notnull" json:"token_ttl_days"`
-	MaxSeats     int       `bun:",notnull" json:"max_seats"`
-	Active       bool      `bun:",notnull,default:true" json:"active"`
-	SortOrder    int       `bun:",default:0" json:"sort_order"`
-	CreatedAt    time.Time `bun:",nullzero,default:now()" json:"created_at"`
+	TokenTTLDays int `bun:",notnull" json:"token_ttl_days"`
+	// SelfSignup lets a visitor claim a licence on this plan from its
+	// /pay link by confirming an email address. Only for plans with no
+	// Stripe price and no update period. SignupDailyCap limits claims
+	// per UTC day (0 = no cap); SignupConsentText, when set, is the
+	// label of an optional marketing-consent checkbox on the form.
+	SelfSignup        bool      `bun:",notnull" json:"self_signup"`
+	SignupDailyCap    int       `bun:",notnull" json:"signup_daily_cap"`
+	SignupConsentText string    `bun:",notnull" json:"signup_consent_text"`
+	MaxSeats          int       `bun:",notnull" json:"max_seats"`
+	Active            bool      `bun:",notnull,default:true" json:"active"`
+	SortOrder         int       `bun:",default:0" json:"sort_order"`
+	CreatedAt         time.Time `bun:",nullzero,default:now()" json:"created_at"`
 
 	Product      *Product       `bun:"rel:belongs-to,join:product_id=id" json:"product,omitempty"`
 	Entitlements []*Entitlement `bun:"rel:has-many,join:id=plan_id" json:"entitlements,omitempty"`
@@ -368,6 +376,14 @@ type License struct {
 	ExternalCustomerID  string `bun:",notnull,default:''" json:"external_customer_id,omitempty"`
 	ExternalWorkspaceID string `bun:",notnull,default:''" json:"external_workspace_id,omitempty"`
 
+	// SignupSource is SignupSourceSelf for a licence the customer
+	// claimed themselves on a self sign-up plan, empty otherwise.
+	// MarketingConsent is what they answered to the plan's consent
+	// checkbox at that moment, stamped with MarketingConsentAt.
+	SignupSource       string     `bun:",notnull,default:''" json:"signup_source,omitempty"`
+	MarketingConsent   bool       `bun:",notnull" json:"marketing_consent"`
+	MarketingConsentAt *time.Time `json:"marketing_consent_at,omitempty"`
+
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 	UpdatedAt time.Time `bun:",nullzero,default:now()" json:"updated_at"`
 
@@ -402,6 +418,10 @@ const (
 	StatusSuspended = "suspended"
 	StatusRevoked   = "revoked"
 )
+
+// SignupSourceSelf marks a licence claimed through self sign-up
+// (License.SignupSource).
+const SignupSourceSelf = "self_signup"
 
 // Who suspended a licence (License.SuspendedBy).
 const (

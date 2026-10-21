@@ -402,7 +402,7 @@ func main() {
 	})
 
 	licenseH := handler.NewLicenseHandler(licenseSvc)
-	authH := &handler.AuthHandler{Store: db, Config: cfg, Email: emailSvc}
+	authH := &handler.AuthHandler{Store: db, Config: cfg, Email: emailSvc, Webhook: webhookSvc}
 	stripeH := &payment.StripeHandler{
 		Store:         db,
 		WebhookSecret: cfg.StripeWebhookSecret,
@@ -854,6 +854,20 @@ func main() {
 
 	// Unified checkout: GET /pay/:checkout_id → Stripe
 	r.GET("/pay/:checkout_id", stripeH.CheckoutByPlan)
+
+	// Self sign-up for free plans (/pay sends those plans to the form).
+	// The code-sending step shares the login's buckets, so it cannot be
+	// used to mail more codes than the login form could.
+	v1.GET("/signup/:checkout_id",
+		middleware.RateLimitByIPScoped("public_plans", cfg.RateLimitAPI, time.Minute),
+		authH.SignupInfo)
+	signup := v1.Group("/signup", middleware.RateLimitByIPScoped("auth", cfg.RateLimitAuth, time.Minute))
+	{
+		signup.POST("/:checkout_id/send",
+			middleware.RateLimitByIPScoped("otp_send", cfg.RateLimitOTPSend, time.Hour),
+			authH.SignupSend)
+		signup.POST("/:checkout_id/verify", authH.SignupVerify)
+	}
 
 	portal := v1.Group("/portal", middleware.SessionAuth(cfg.JWTSecret, db.FindUserIsAdmin))
 	{
