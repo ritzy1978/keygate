@@ -11,7 +11,7 @@ export default function CheckoutSuccessPage() {
   const { site_name, logo_url, attribution_text, attribution_url } = useSiteConfig()
   const [status, setStatus] = useState<"loading" | "ok" | "error">("loading")
   const [email, setEmail] = useState("")
-  const [renewal, setRenewal] = useState(false)
+  const [kind, setKind] = useState("")
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -26,7 +26,7 @@ export default function CheckoutSuccessPage() {
       .then((r) => {
         setStatus(r.status === "ok" ? "ok" : "loading")
         if (r.email) setEmail(r.email)
-        setRenewal(r.kind === "renewal")
+        setKind(r.kind ?? "")
       })
       .catch(() => setStatus("error"))
   }, [])
@@ -51,9 +51,11 @@ export default function CheckoutSuccessPage() {
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle className="h-12 w-12 text-green-500" />
               <h3 className="text-xl font-semibold">{t("checkout.success")}</h3>
-              {renewal ? (
+              {kind === "renewal" || kind === "upgrade" ? (
                 <>
-                  <p className="text-muted-foreground">{t("checkout.renewalSuccess")}</p>
+                  <p className="text-muted-foreground">
+                    {kind === "renewal" ? t("checkout.renewalSuccess") : t("checkout.upgradeSuccess")}
+                  </p>
                   <Button className="mt-4" asChild>
                     <a href="/portal">{t("checkout.backToPortal")}</a>
                   </Button>

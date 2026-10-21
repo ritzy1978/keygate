@@ -93,6 +93,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   const [copied, setCopied] = useState(false)
   const [showInvoices, setShowInvoices] = useState(false)
   const [showChangePlan, setShowChangePlan] = useState(false)
+  const [showUpgrade, setShowUpgrade] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
   const productType = lic.product?.type || "perpetual"
   const showUsage = productType === "saas" || productType === "hybrid"
@@ -113,6 +114,13 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // subscription. A one-time purchase has none: the backend answers 400
   // to each, so don't offer them.
   const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
+  // A licence Stripe doesn't bill (a free plan's) upgrades through a
+  // checkout and keeps its key. Suspended and revoked ones can't.
+  const canUpgrade =
+    isOwner &&
+    lic.payment_provider !== "stripe" &&
+    !lic.stripe_subscription_id &&
+    ["active", "trialing", "expired", "canceled"].includes(lic.status)
 
   // Maintenance period of a perpetual license. The license never
   // expires; updates_until only bounds which releases may be installed.
@@ -221,6 +229,14 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
           </div>
         )}
 
+        {canUpgrade && (
+          <div className="flex gap-2 flex-wrap">
+            <Button size="sm" onClick={() => setShowUpgrade(true)}>
+              {t("portal.upgrade")}
+            </Button>
+          </div>
+        )}
+
         {/* Billing actions (license holder only) */}
         {isOwner && lic.payment_provider === "stripe" && (
           <div className="flex gap-2 flex-wrap">
@@ -289,6 +305,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
         {showInvoices && <InvoicesDialog licenseId={lic.id} onClose={() => setShowInvoices(false)} />}
 
         {showChangePlan && <ChangePlanDialog license={lic} onClose={() => setShowChangePlan(false)} />}
+        {showUpgrade && <UpgradeDialog license={lic} onClose={() => setShowUpgrade(false)} />}
       </CardContent>
     </Card>
   )
@@ -881,6 +898,70 @@ function InvoicesDialog({ licenseId, onClose }: { licenseId: string; onClose: ()
                       </Button>
                     )}
                   </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// UpgradeDialog lists the product's paid plans for a licence nothing is
+// billing yet. Picking one goes to Stripe checkout; once paid, the same
+// licence moves to that plan.
+function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: () => void }) {
+  const { t } = useI18n()
+  const { data: plansData } = useQuery({
+    queryKey: ["portal", "plans", license.product_id],
+    queryFn: () => portal.listPlans(license.product_id),
+  })
+  // Mirrors the server's upgrade targets: priced, not a trial, and no
+  // update period on sale.
+  const plans = (plansData?.plans || []).filter(
+    (p: Plan) =>
+      p.id !== license.plan_id &&
+      !!p.stripe_price_id &&
+      p.license_type !== "trial" &&
+      !(p.license_type === "perpetual" && (p.updates_days ?? 0) > 0),
+  )
+  const [starting, setStarting] = useState("")
+  const start = async (plan: Plan) => {
+    setStarting(plan.id)
+    try {
+      const res = await portal.upgrade({ license_id: license.id, plan_id: plan.id })
+      window.location.href = res.url
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "An error occurred", "error")
+      setStarting("")
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="h-[min(560px,85vh)]">
+        <DialogHeader>
+          <DialogTitle>{t("portal.upgrade")}</DialogTitle>
+          <DialogDescription>{t("portal.upgradeDesc")}</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          {plans.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">{t("portal.noUpgradePlans")}</p>
+          ) : (
+            <div className="space-y-2">
+              {plans.map((plan: Plan) => (
+                <div key={plan.id} className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
+                  <div>
+                    <p className="font-medium text-sm">{plan.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {plan.license_type}
+                      {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" onClick={() => start(plan)} disabled={starting !== ""}>
+                    {starting === plan.id ? t("common.loading") : t("portal.upgrade")}
+                  </Button>
                 </div>
               ))}
             </div>
