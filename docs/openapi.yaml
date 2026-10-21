@@ -498,6 +498,53 @@ paths:
         "404":
           description: License or seat not found, or caller lacks mutation rights
 
+  /portal/licenses/upgrade:
+    post:
+      tags: [License]
+      summary: Upgrade a license that Stripe doesn't bill to a paid plan (portal session)
+      description: |
+        For the license holder's own license on a plan with no Stripe
+        billing (a free plan, issued by an admin or through self sign-up).
+        Returns a Stripe Checkout URL for the target plan's price. When
+        the session is paid, the same license moves to that plan and is
+        linked to the Stripe subscription or payment: its key and
+        activations stay, and a `plan.changed` webhook fires.
+
+        Targets are active plans of the same product with a Stripe price;
+        trial plans and plans selling an update period are not offered.
+        Suspended and revoked licenses cannot upgrade; expired and
+        canceled ones can. Requires a portal session cookie; the caller's
+        email must match the license's.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [license_id, plan_id]
+              properties:
+                license_id: { type: string, format: uuid }
+                plan_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      url: { type: string, format: uri }
+        "400":
+          description: "`UPGRADE_NOT_AVAILABLE`, the license or plan doesn't qualify"
+        "403":
+          description: Not the caller's license
+        "503":
+          description: "`UPGRADE_UNAVAILABLE`, the plan's Stripe price can't be sold right now"
+
   /invites/accept:
     post:
       tags: [Seats]

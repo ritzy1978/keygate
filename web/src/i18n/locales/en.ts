@@ -531,6 +531,7 @@ const en = {
   "checkout.error": "Unable to verify payment. Your license will be delivered shortly via email.",
   "checkout.viewLicense": "View my license",
   "checkout.renewalSuccess": "Your update period has been extended.",
+  "checkout.upgradeSuccess": "Your license has been upgraded. Your key stays the same.",
   "checkout.backToPortal": "Back to my licenses",
 
   // Portal
@@ -582,6 +583,9 @@ const en = {
   "portal.invoices": "Invoices",
   "portal.changePlanDesc": "Select a new plan. Changes take effect immediately with prorated billing.",
   "portal.noOtherPlans": "No other plans available.",
+  "portal.upgrade": "Upgrade",
+  "portal.upgradeDesc": "Choose a paid plan. You'll pay on the next page, and this license keeps its key.",
+  "portal.noUpgradePlans": "No paid plans are available for this product.",
   "portal.confirmSwitchTitle": "Switch to {plan}?",
   "portal.confirmSwitchDesc": "The change takes effect now. Stripe prorates the difference on your next invoice.",
   "portal.confirmSwitch": "Switch plan",

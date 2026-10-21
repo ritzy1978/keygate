@@ -662,6 +662,11 @@ func (h *StripeHandler) fulfillCheckout(ctx context.Context, email, customerID, 
 	if metadata != nil && metadata[metaKind] == kindRenewal {
 		return h.fulfillRenewal(ctx, metadata, sessionID, paymentIntentID, source)
 	}
+	// An upgrade changes the licence it names; falling through would
+	// issue a second licence for it.
+	if metadata != nil && metadata[metaKind] == kindUpgrade {
+		return h.fulfillUpgrade(ctx, customerID, subscriptionID, paymentIntentID, metadata, sessionID, source)
+	}
 	var plan *model.Plan
 	var err error
 
@@ -1029,8 +1034,8 @@ func (h *StripeHandler) VerifyCheckoutSession(c *gin.Context) {
 	}
 
 	out := gin.H{"status": "ok", "email": sessionEmail(sess)}
-	if sess.Metadata[metaKind] == kindRenewal {
-		out["kind"] = kindRenewal
+	if k := sess.Metadata[metaKind]; k == kindRenewal || k == kindUpgrade {
+		out["kind"] = k
 	}
 	response.OK(c, out)
 }

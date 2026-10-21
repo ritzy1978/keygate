@@ -953,6 +953,9 @@ func main() {
 						"id": p.ID, "name": p.Name, "slug": p.Slug,
 						"license_type": p.LicenseType, "billing_interval": p.BillingInterval,
 						"stripe_price_id": p.StripePriceID, "checkout_id": p.CheckoutID,
+						// The portal's upgrade offers no plan selling an
+						// update period; it needs this to leave them out.
+						"updates_days": p.UpdatesDays,
 					})
 				}
 			}
@@ -1108,6 +1111,7 @@ func main() {
 		// Maintenance renewal for perpetual licenses: a one-time
 		// checkout that extends updates_until.
 		portal.POST("/updates/renew", stripeH.RenewUpdates)
+		portal.POST("/licenses/upgrade", stripeH.StartUpgrade)
 	}
 
 	// Admin route layout: three groups under /admin, all sharing the
