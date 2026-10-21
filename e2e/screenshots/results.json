@@ -1,0 +1,82 @@
+[
+  {
+    "name": "plan saved with self sign-up settings",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "self sign-up refused on a priced plan",
+    "ok": true,
+    "detail": "Error: POST /admin/plans -> 400 {\"success\":false,\"error\":{\"code\":\"BAD_REQUEST\",\"message\":\"self_signup is only available "
+  },
+  {
+    "name": "03-signup: /pay redirects to the sign-up form",
+    "ok": true,
+    "detail": "http://localhost:9000/signup/392c9bb1"
+  },
+  {
+    "name": "free licence issued on Community",
+    "ok": true,
+    "detail": "Community"
+  },
+  {
+    "name": "marketing consent recorded",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "signed in to the portal after sign-up",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "upgrade dialog offers Premium",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "webhook accepted (first delivery)",
+    "ok": true,
+    "detail": "200 {\"received\":true}"
+  },
+  {
+    "name": "webhook accepted (Stripe retry)",
+    "ok": true,
+    "detail": "200 {\"received\":true,\"skipped\":true}"
+  },
+  {
+    "name": "still one licence after the upgrade and a replayed webhook",
+    "ok": true,
+    "detail": "1"
+  },
+  {
+    "name": "same licence moved to Premium",
+    "ok": true,
+    "detail": "Premium"
+  },
+  {
+    "name": "licence key unchanged",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "licence now billed by the Stripe subscription",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "07-signup-again: /pay redirects to the sign-up form",
+    "ok": true,
+    "detail": "http://localhost:9000/signup/392c9bb1"
+  },
+  {
+    "name": "second sign-up finds the existing licence",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "no second free licence created",
+    "ok": true,
+    "detail": "1"
+  }
+]
