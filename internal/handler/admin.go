@@ -1072,6 +1072,10 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
 			return
 		}
+		if store.IsSelfSignupPlanConflict(err) {
+			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
+			return
+		}
 		if feedGateConflict(c, err) {
 			return
 		}
@@ -1320,6 +1324,25 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 			return
 		}
 	}
+	// Judged on the plan as it will stand: a price or an update period
+	// added to a self sign-up plan is refused the same as the reverse.
+	// Checked before the gating checks below, so an operator is told
+	// the combination is not allowed before being sent to gate a feed
+	// for it.
+	selfSignup, signupCap, consentText := p.SelfSignup, p.SignupDailyCap, p.SignupConsentText
+	if req.SelfSignup != nil {
+		selfSignup = *req.SelfSignup
+	}
+	if req.SignupDailyCap != nil {
+		signupCap = *req.SignupDailyCap
+	}
+	if req.SignupConsentText != nil {
+		consentText = strings.TrimSpace(*req.SignupConsentText)
+	}
+	if err := validateSelfSignup(selfSignup, signupCap, consentText, purchasePrice, maint); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	if h.stripePricesTaken(c, purchasePrice, maint.StripeRenewalPriceID, p.ID) {
 		return
 	}
@@ -1337,22 +1360,6 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	}
 	needsGatedFeed := maint.UpdatesDays > 0 || maint.StripeRenewalPriceID != ""
 	if needsGatedFeed && h.feedNotGated(c, prod) {
-		return
-	}
-	// Judged on the plan as it will stand: a price or an update period
-	// added to a self sign-up plan is refused the same as the reverse.
-	selfSignup, signupCap, consentText := p.SelfSignup, p.SignupDailyCap, p.SignupConsentText
-	if req.SelfSignup != nil {
-		selfSignup = *req.SelfSignup
-	}
-	if req.SignupDailyCap != nil {
-		signupCap = *req.SignupDailyCap
-	}
-	if req.SignupConsentText != nil {
-		consentText = strings.TrimSpace(*req.SignupConsentText)
-	}
-	if err := validateSelfSignup(selfSignup, signupCap, consentText, purchasePrice, maint); err != nil {
-		response.BadRequest(c, err.Error())
 		return
 	}
 	p.StripePriceID = purchasePrice
@@ -1417,6 +1424,10 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		}
 		if isStripePriceConflict(err) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
+			return
+		}
+		if store.IsSelfSignupPlanConflict(err) {
+			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
 			return
 		}
 		if feedGateConflict(c, err) {

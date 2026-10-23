@@ -175,12 +175,18 @@ export const signup = {
   info: (checkoutId: string) => get<SignupInfo>(`/signup/${encodeURIComponent(checkoutId)}`),
   send: (checkoutId: string, email: string) =>
     post<{ status: string }>(`/signup/${encodeURIComponent(checkoutId)}/send`, { email }),
-  verify: (checkoutId: string, email: string, code: string, marketingConsent: boolean) =>
-    post<{ status: "created" | "existing"; license_id: string }>(`/signup/${encodeURIComponent(checkoutId)}/verify`, {
-      email,
-      code,
-      marketing_consent: marketingConsent,
-    }),
+  // consentText is the wording the form showed; the server records a
+  // yes only against the wording it holds now.
+  verify: (checkoutId: string, email: string, code: string, marketingConsent: boolean, consentText: string) =>
+    post<{ status: "created" | "existing"; license_id: string; license_status?: string; license_usable?: boolean }>(
+      `/signup/${encodeURIComponent(checkoutId)}/verify`,
+      {
+        email,
+        code,
+        marketing_consent: marketingConsent,
+        consent_text: consentText,
+      },
+    ),
 }
 
 // ─── Checkout ───
@@ -712,6 +718,10 @@ export interface License {
   notes?: string
   external_customer_id?: string
   external_workspace_id?: string
+  // Set on a licence the customer claimed through self sign-up.
+  signup_source?: string
+  marketing_consent?: boolean
+  marketing_consent_at?: string
   created_at: string
   updated_at: string
   product?: Product

@@ -383,6 +383,9 @@ type License struct {
 	SignupSource       string     `bun:",notnull,default:''" json:"signup_source,omitempty"`
 	MarketingConsent   bool       `bun:",notnull" json:"marketing_consent"`
 	MarketingConsentAt *time.Time `json:"marketing_consent_at,omitempty"`
+	// SignupPlanID is the plan a self sign-up licence was claimed on.
+	// PlanID moves with the licence; this stays, for the daily cap.
+	SignupPlanID string `bun:",nullzero" json:"signup_plan_id,omitempty"`
 
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 	UpdatedAt time.Time `bun:",nullzero,default:now()" json:"updated_at"`

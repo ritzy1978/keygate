@@ -187,6 +187,9 @@ func (h *AuthHandler) checkCode(c *gin.Context, email, code string) bool {
 
 	// Two requests carrying the same code both get past the compare
 	// above; only the one that flips the row to used goes on.
+	if h.beforeConsumeCode != nil {
+		h.beforeConsumeCode()
+	}
 	consumed, err := h.Store.ConsumeOTPCode(c, otpID)
 	if err != nil {
 		response.Internal(c, err)

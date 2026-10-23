@@ -113,7 +113,9 @@ const zh = {
   "plans.tokenTtlDays": "签到间隔 (天)",
   "plans.tokenTtlDaysHint": "设备离线多久后必须重新验证。0 = 默认 (7 天)。",
   "plans.selfSignup": "自助注册",
-  "plans.selfSignupHint": "访客通过此套餐链接确认邮箱即可领取免费许可证。仅适用于没有 Stripe 价格和更新期的套餐。",
+  "plans.selfSignupHint":
+    "访客通过此套餐链接确认邮箱即可领取免费许可证。仅适用于没有 Stripe 价格、更新期和续费的套餐。即使设置为仅持有许可证的邮箱才能创建账号，此链接也会向任何邮箱发送验证码。",
+  "plans.selfSignupTurnsOff": "设置价格、更新期或续费后保存，会关闭自助注册：此套餐的注册链接将不再接受注册。",
   "plans.signupDailyCap": "每日注册上限",
   "plans.signupDailyCapHint": "每天 (UTC) 新增的许可证数量。0 = 不限。",
   "plans.signupConsentText": "营销同意复选框",
@@ -534,6 +536,12 @@ const zh = {
   "signup.createdBody": "许可证密钥已发送至 {email}，您也可以在账户中查看。",
   "signup.existingTitle": "您已拥有此许可证",
   "signup.existingBody": "{email} 已拥有此产品的许可证，可在您的账户中查看。",
+  "signup.inactiveTitle": "您之前已领取过",
+  "signup.inactiveBody": "{email} 已领取过此产品的许可证，但该许可证已失效。如有疑问，请联系我们。",
+  "signup.full": "此套餐今天的注册名额已满。请明天再试；如果您已有许可证，请直接登录。",
+  "signup.signIn": "登录",
+  "signup.trialSubtitle": "开始 {days} 天的 {product} 试用。确认您的邮箱后，我们会将密钥发送给您。",
+  "signup.loadFailed": "无法加载注册表单，请稍后再试。",
   "signup.openAccount": "打开我的账户",
 
   // Portal
@@ -678,6 +686,10 @@ const zh = {
   // Licenses extras
   "licenses.notes": "备注",
   "licenses.notesOptional": "备注（可选）",
+  "licenses.source": "来源",
+  "licenses.sourceSelfSignup": "自助注册",
+  "licenses.marketingConsent": "营销同意",
+  "licenses.marketingConsentYes": "已同意（{date}）",
   "licenses.externalCustomerID": "外部 customer ID",
   "licenses.externalWorkspaceID": "外部 workspace ID",
   "licenses.externalIDPlaceholder": "可选。商家自己的用户 / 租户 ID。",

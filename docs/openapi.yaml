@@ -609,6 +609,10 @@ paths:
         operator opening the plan is the decision to take sign-ups.
         The reply is the same whether or not the address already holds
         a licence on the plan.
+
+        No code is mailed once the plan's `signup_daily_cap` is used up
+        for the day, whoever asks: an existing customer signs in through
+        the normal login instead.
       parameters:
         - $ref: "#/components/parameters/CheckoutID"
       requestBody:
@@ -623,10 +627,14 @@ paths:
       responses:
         "200":
           description: Code sent
+        "400":
+          description: Missing or malformed email (a bare address of at most 254 characters)
         "404":
           description: "`SIGNUP_UNAVAILABLE`"
         "429":
-          description: "`RATE_LIMITED`, too many codes for this address"
+          description: |
+            `RATE_LIMITED`, too many codes for this address or from this IP;
+            or `SIGNUP_LIMIT_REACHED`, the plan's daily cap is used up
 
   /signup/{checkout_id}/verify:
     post:
@@ -641,7 +649,13 @@ paths:
         One self sign-up licence per address per product: an address
         that already holds one (on this plan, or on a plan it has moved
         to since) is signed in to it (`200`, `status: existing`). The plan's
-        `signup_daily_cap`, when set, limits new licences per UTC day.
+        `signup_daily_cap`, when set, limits new licences per UTC day,
+        counting claims made on the plan even if they have moved to
+        another plan since.
+
+        The portal account is created only once the address holds a
+        licence: a refused claim leaves none behind, so it cannot be
+        used to get past `signup_mode=licensed_only`.
 
         The new licence has `signup_source: self_signup`. When the plan
         has `signup_consent_text`, the visitor's `marketing_consent`
@@ -662,6 +676,14 @@ paths:
                 marketing_consent:
                   type: boolean
                   description: Ignored unless the plan has `signup_consent_text`.
+                consent_text:
+                  type: string
+                  description: |
+                    The consent wording the form showed. A `marketing_consent`
+                    of true is recorded only when this matches the plan's
+                    `signup_consent_text`; if the operator edited the wording
+                    since the form loaded, the licence is created without
+                    consent.
       responses:
         "201":
           description: Licence created and emailed; session issued
@@ -689,14 +711,28 @@ paths:
                     properties:
                       status: { type: string, enum: [existing] }
                       license_id: { type: string, format: uuid }
+                      license_status:
+                        type: string
+                        description: The existing licence's status, which may be revoked or expired
+                      license_usable:
+                        type: boolean
+                        description: Whether the existing licence still verifies, judged as `/license/verify` judges it
+        "400":
+          description: Missing code, or missing or malformed email
         "401":
-          description: Wrong, expired or already-used code
+          description: Wrong, expired or already-used code, or too many attempts
         "404":
           description: "`SIGNUP_UNAVAILABLE`"
         "409":
           description: "`PLAN_CHANGED`, the plan was edited mid-claim; try again"
         "429":
-          description: "`SIGNUP_LIMIT_REACHED`, the plan's daily cap is used up"
+          description: |
+            `SIGNUP_LIMIT_REACHED`, the plan's daily cap is used up; or
+            `RATE_LIMITED`, too many requests from this IP
+        "500":
+          description: |
+            Includes the rare case where the licence was created and emailed
+            but signing in failed; a retry signs in to that licence
 
   /license/floating/checkout:
     post:
