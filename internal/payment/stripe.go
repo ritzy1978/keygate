@@ -198,6 +198,12 @@ func (h *StripeHandler) CheckoutByPlan(c *gin.Context) {
 	}
 
 	if plan.StripePriceID == "" {
+		// A free plan the operator opened for self sign-up takes the
+		// visitor to its form; the form's API re-checks the plan.
+		if plan.SelfSignup {
+			c.Redirect(http.StatusFound, h.BaseURL+"/signup/"+checkoutID)
+			return
+		}
 		c.String(http.StatusServiceUnavailable, "payment not configured for this plan")
 		return
 	}

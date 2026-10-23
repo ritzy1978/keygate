@@ -61,9 +61,14 @@ func setSecureCookie(c *gin.Context, name, value string, maxAge int, path string
 }
 
 type AuthHandler struct {
-	Store  *store.Store
-	Config *config.Config
-	Email  *service.EmailService
+	Store   *store.Store
+	Config  *config.Config
+	Email   *service.EmailService
+	Webhook *service.WebhookService
+	// beforeConsumeCode runs between a code matching and it being
+	// marked used. Tests use it to hold several requests in that
+	// window; nil everywhere else.
+	beforeConsumeCode func()
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {

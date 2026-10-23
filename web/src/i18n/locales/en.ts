@@ -113,6 +113,15 @@ const en = {
   "plans.floatingTimeout": "Floating Timeout (minutes)",
   "plans.tokenTtlDays": "Check-in Interval (days)",
   "plans.tokenTtlDaysHint": "How long a device can stay offline before it must verify again. 0 = default (7 days).",
+  "plans.selfSignup": "Self sign-up",
+  "plans.selfSignupHint":
+    "Visitors claim a free license from this plan's link by confirming their email. Only for plans without a Stripe price, update period or renewals. The link mails a code to any address, even when only emails that hold a license can create an account.",
+  "plans.selfSignupTurnsOff":
+    "Saving with a price, update period or renewals turns self sign-up off: this plan's sign-up link will stop taking sign-ups.",
+  "plans.signupDailyCap": "Daily sign-up limit",
+  "plans.signupDailyCapHint": "New licenses per day (UTC). 0 = no limit.",
+  "plans.signupConsentText": "Marketing consent checkbox",
+  "plans.signupConsentTextHint": "Label of an optional checkbox on the sign-up form. Leave empty for none.",
   "plans.hintDesktop": "Desktop product — supports activations + auto-update feeds. Seats are disabled.",
   "plans.hintSaas": "SaaS product — supports seats and usage. Activations and release feeds are disabled.",
   "plans.hintHybrid": "Hybrid product — activations, seats, and release feeds are all available.",
@@ -534,6 +543,25 @@ const en = {
   "checkout.upgradeSuccess": "Your license has been upgraded. Your key stays the same.",
   "checkout.backToPortal": "Back to my licenses",
 
+  // Self sign-up
+  "signup.subtitle": "Get a free {product} license. Confirm your email and we'll send you the key.",
+  "signup.unavailable": "Sign-up isn't available for this plan.",
+  "signup.sendCode": "Send confirmation code",
+  "signup.claim": "Get my license",
+  "signup.createdTitle": "Your license is on its way",
+  "signup.createdBody": "We've emailed your license key to {email}. It's also in your account.",
+  "signup.existingTitle": "You already have this license",
+  "signup.existingBody": "{email} already has a license for this product. You'll find it in your account.",
+  "signup.inactiveTitle": "You've claimed this before",
+  "signup.inactiveBody":
+    "{email} has already claimed a license for this product, and it's no longer active. Contact us if you think this is a mistake.",
+  "signup.full":
+    "This plan has taken all the sign-ups it accepts today. Try again tomorrow, or sign in if you already have a license.",
+  "signup.signIn": "Sign in",
+  "signup.trialSubtitle": "Start a {days}-day {product} trial. Confirm your email and we'll send you the key.",
+  "signup.loadFailed": "Couldn't load the sign-up form. Please try again in a moment.",
+  "signup.openAccount": "Open my account",
+
   // Portal
   "portal.myLicenses": "My Licenses",
   "portal.myLicensesDesc": "Manage your software licenses, usage, and team members.",
@@ -680,6 +708,10 @@ const en = {
   // Licenses extras
   "licenses.notes": "Notes",
   "licenses.notesOptional": "Notes (optional)",
+  "licenses.source": "Source",
+  "licenses.sourceSelfSignup": "Self sign-up",
+  "licenses.marketingConsent": "Marketing consent",
+  "licenses.marketingConsentYes": "Yes, on {date}",
   "licenses.externalCustomerID": "External customer ID",
   "licenses.externalWorkspaceID": "External workspace ID",
   "licenses.externalIDPlaceholder": "Optional. Your own user/tenant ID.",

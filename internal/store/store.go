@@ -662,6 +662,15 @@ func (s *Store) CreateLicense(ctx context.Context, l *model.License) error {
 // CreateLicenseWithSubscription creates a license and, for subscription/trial plans,
 // a subscription record in a single transaction to prevent orphan records.
 func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.License, plan *model.Plan) error {
+	return s.createLicenseWithSubscription(ctx, l, plan, nil)
+}
+
+// createLicenseWithSubscription is CreateLicenseWithSubscription with
+// an optional guard, run on the transaction once the plan and product
+// rows are locked and before anything is written; an error from it
+// rolls the whole write back.
+func (s *Store) createLicenseWithSubscription(ctx context.Context, l *model.License, plan *model.Plan,
+	guard func(ctx context.Context, tx bun.Tx) error) error {
 	if err := s.prepareLicenseForInsert(l); err != nil {
 		return err
 	}
@@ -677,6 +686,11 @@ func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.Lice
 	// edit. Locking them also pins the plan for the checks below.
 	if err := LockReferencedRowsIn(ctx, tx, l.PlanID, l.ProductID); err != nil {
 		return err
+	}
+	if guard != nil {
+		if err := guard(ctx, tx); err != nil {
+			return err
+		}
 	}
 
 	// The plan the caller read may have been retyped since — a
@@ -1889,12 +1903,23 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Store) MarkOTPUsed(ctx context.Context, id string) error {
-	_, err := s.DB.NewUpdate().Model((*model.OTPCode)(nil)).
+// ConsumeOTPCode marks an unused code used and reports whether this
+// call was the one that did it. Two requests presenting the same code
+// at once both pass the hash check; only one of them gets true here.
+func (s *Store) ConsumeOTPCode(ctx context.Context, id string) (bool, error) {
+	res, err := s.DB.NewUpdate().Model((*model.OTPCode)(nil)).
 		Set("used = true").
 		Where("id = ?", id).
+		Where("used = false").
 		Exec(ctx)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 func (s *Store) CleanExpiredOTPs(ctx context.Context) {

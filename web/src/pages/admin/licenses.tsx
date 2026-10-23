@@ -814,6 +814,22 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     <p className="mt-1">{lic.notes}</p>
                   </div>
                 )}
+                {lic.signup_source === "self_signup" && (
+                  <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
+                    <div>
+                      <p className="text-muted-foreground">{t("licenses.source")}</p>
+                      <p className="mt-1">{t("licenses.sourceSelfSignup")}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">{t("licenses.marketingConsent")}</p>
+                      <p className="mt-1">
+                        {lic.marketing_consent && lic.marketing_consent_at
+                          ? t("licenses.marketingConsentYes", { date: formatDate(lic.marketing_consent_at) })
+                          : t("common.no")}
+                      </p>
+                    </div>
+                  </div>
+                )}
                 {(lic.external_customer_id || lic.external_workspace_id) && (
                   <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
                     {lic.external_customer_id && (

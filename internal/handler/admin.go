@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stripe/stripe-go/v82/subscription"
@@ -910,6 +911,9 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		LicenseModel         string `json:"license_model"`
 		FloatingTimeout      *int   `json:"floating_timeout"`
 		TokenTTLDays         int    `json:"token_ttl_days"`
+		SelfSignup           bool   `json:"self_signup"`
+		SignupDailyCap       int    `json:"signup_daily_cap"`
+		SignupConsentText    string `json:"signup_consent_text"`
 		SortOrder            int    `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1023,6 +1027,12 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 	if h.stripePricesTaken(c, req.StripePriceID, maint.StripeRenewalPriceID, "") {
 		return
 	}
+	req.SignupConsentText = strings.TrimSpace(req.SignupConsentText)
+	if err := validateSelfSignup(req.SelfSignup, req.SignupDailyCap, req.SignupConsentText,
+		req.StripePriceID, maint); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	needsGatedFeed := maint.UpdatesDays > 0 || maint.StripeRenewalPriceID != ""
 	if needsGatedFeed && h.maintenanceGated(c) {
 		return
@@ -1048,6 +1058,9 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		LicenseModel:         licenseModel,
 		FloatingTimeout:      floatingTimeout,
 		TokenTTLDays:         req.TokenTTLDays,
+		SelfSignup:           req.SelfSignup,
+		SignupDailyCap:       req.SignupDailyCap,
+		SignupConsentText:    req.SignupConsentText,
 		Active:               true,
 		SortOrder:            req.SortOrder,
 	}
@@ -1057,6 +1070,10 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		}
 		if isStripePriceConflict(err) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
+			return
+		}
+		if store.IsSelfSignupPlanConflict(err) {
+			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1098,6 +1115,9 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		LicenseModel         *string `json:"license_model"`
 		FloatingTimeout      *int    `json:"floating_timeout"`
 		TokenTTLDays         *int    `json:"token_ttl_days"`
+		SelfSignup           *bool   `json:"self_signup"`
+		SignupDailyCap       *int    `json:"signup_daily_cap"`
+		SignupConsentText    *string `json:"signup_consent_text"`
 		Active               *bool   `json:"active"`
 		SortOrder            *int    `json:"sort_order"`
 	}
@@ -1304,6 +1324,25 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 			return
 		}
 	}
+	// Judged on the plan as it will stand: a price or an update period
+	// added to a self sign-up plan is refused the same as the reverse.
+	// Checked before the gating checks below, so an operator is told
+	// the combination is not allowed before being sent to gate a feed
+	// for it.
+	selfSignup, signupCap, consentText := p.SelfSignup, p.SignupDailyCap, p.SignupConsentText
+	if req.SelfSignup != nil {
+		selfSignup = *req.SelfSignup
+	}
+	if req.SignupDailyCap != nil {
+		signupCap = *req.SignupDailyCap
+	}
+	if req.SignupConsentText != nil {
+		consentText = strings.TrimSpace(*req.SignupConsentText)
+	}
+	if err := validateSelfSignup(selfSignup, signupCap, consentText, purchasePrice, maint); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	if h.stripePricesTaken(c, purchasePrice, maint.StripeRenewalPriceID, p.ID) {
 		return
 	}
@@ -1326,6 +1365,18 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	p.StripePriceID = purchasePrice
 	if req.StripePriceID != nil {
 		cols = append(cols, "stripe_price_id")
+	}
+	if req.SelfSignup != nil {
+		p.SelfSignup = selfSignup
+		cols = append(cols, "self_signup")
+	}
+	if req.SignupDailyCap != nil {
+		p.SignupDailyCap = signupCap
+		cols = append(cols, "signup_daily_cap")
+	}
+	if req.SignupConsentText != nil {
+		p.SignupConsentText = consentText
+		cols = append(cols, "signup_consent_text")
 	}
 	if req.LicenseModel != nil {
 		p.LicenseModel = *req.LicenseModel
@@ -1373,6 +1424,10 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		}
 		if isStripePriceConflict(err) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
+			return
+		}
+		if store.IsSelfSignupPlanConflict(err) {
+			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1810,6 +1865,31 @@ func validatePlanNumericBounds(b planBounds) error {
 		return fmt.Errorf("token_ttl_days cannot be negative")
 	case b.TokenTTLDays > 365:
 		return fmt.Errorf("token_ttl_days cannot exceed 365")
+	}
+	return nil
+}
+
+// validateSelfSignup checks a plan's self sign-up settings against the
+// rest of the plan. Self sign-up hands out licences for nothing, so it
+// is refused on a plan that has a price; and an update period needs
+// the gating checks a sale gets, so a plan selling one can't take it.
+func validateSelfSignup(on bool, dailyCap int, consentText, stripePriceID string, maint maintenanceFields) error {
+	switch {
+	case dailyCap < 0:
+		return fmt.Errorf("signup_daily_cap cannot be negative")
+	case dailyCap > 100000:
+		return fmt.Errorf("signup_daily_cap cannot exceed 100000")
+	case utf8.RuneCountInString(consentText) > 500:
+		return fmt.Errorf("signup_consent_text cannot exceed 500 characters")
+	}
+	if !on {
+		return nil
+	}
+	switch {
+	case stripePriceID != "":
+		return fmt.Errorf("self_signup is only available on plans without a stripe_price_id")
+	case maint.UpdatesDays > 0 || maint.RenewalDays > 0 || maint.StripeRenewalPriceID != "":
+		return fmt.Errorf("self_signup is not available on plans that sell an update period or renewals")
 	}
 	return nil
 }

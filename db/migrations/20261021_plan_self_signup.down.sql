@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS licenses_self_signup_product_email;
+DROP INDEX IF EXISTS licenses_self_signup_plan_day;
+ALTER TABLE licenses DROP COLUMN IF EXISTS signup_plan_id;
+ALTER TABLE licenses DROP COLUMN IF EXISTS marketing_consent_at;
+ALTER TABLE licenses DROP COLUMN IF EXISTS marketing_consent;
+ALTER TABLE licenses DROP COLUMN IF EXISTS signup_source;
+ALTER TABLE plans DROP CONSTRAINT IF EXISTS plans_self_signup_free;
+ALTER TABLE plans DROP COLUMN IF EXISTS signup_consent_text;
+ALTER TABLE plans DROP COLUMN IF EXISTS signup_daily_cap;
+ALTER TABLE plans DROP COLUMN IF EXISTS self_signup;

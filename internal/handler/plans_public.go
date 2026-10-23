@@ -132,6 +132,10 @@ func (h *PublicPlansHandler) ListPlans(c *gin.Context) {
 			"checkout_id": p.CheckoutID,
 			"price":       nil,
 			"currency":    nil,
+			// True when /pay/<checkout_id> leads to the free sign-up
+			// form rather than a checkout, so a pricing page can label
+			// the button.
+			"self_signup": p.SelfSignup && p.StripePriceID == "",
 		}
 		if p.StripePriceID != "" {
 			if price, ok := h.price(priceCtx, p.StripePriceID); ok {
