@@ -747,6 +747,8 @@ export interface License {
 // endpoints. Admin payloads never carry it.
 export interface PortalLicense extends License {
   license_key: string
+  // The owner can upgrade it to a paid plan now, keeping the key.
+  upgradable?: boolean
 }
 
 export interface Activation {

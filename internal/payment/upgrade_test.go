@@ -141,9 +141,27 @@ func TestStartUpgrade_Refusals(t *testing.T) {
 	if code, _ := call("someone-else@example.com", body); code != http.StatusForbidden {
 		t.Fatalf("another customer's licence: %d", code)
 	}
-	// The free plan has no price: it is not something to upgrade to.
-	if code, ec := call(f.lic.Email, map[string]string{"license_id": f.lic.ID, "plan_id": f.free.ID}); code != http.StatusBadRequest || ec != "UPGRADE_NOT_AVAILABLE" {
+	// A plan with no price is not something to upgrade to.
+	otherFree := &model.Plan{ProductID: f.lic.ProductID, Name: "Free 2", Slug: "free2-" + f.tag, LicenseType: "subscription",
+		BillingInterval: "month", LicenseModel: "standard", MaxActivations: 1}
+	if err := f.s.CreatePlan(f.ctx, otherFree); err != nil {
+		t.Fatal(err)
+	}
+	if code, ec := call(f.lic.Email, map[string]string{"license_id": f.lic.ID, "plan_id": otherFree.ID}); code != http.StatusBadRequest || ec != "UPGRADE_NOT_AVAILABLE" {
 		t.Fatalf("free plan: %d %s", code, ec)
+	}
+	// Nor is a licence on a priced plan one to upgrade from.
+	life := f.lifetimePlan(t)
+	f.lic.PlanID = life.ID
+	if err := f.s.UpdateLicense(f.ctx, f.lic, "plan_id"); err != nil {
+		t.Fatal(err)
+	}
+	if code, ec := call(f.lic.Email, body); code != http.StatusBadRequest || ec != "UPGRADE_NOT_AVAILABLE" {
+		t.Fatalf("licence on a priced plan: %d %s", code, ec)
+	}
+	f.lic.PlanID = f.free.ID
+	if err := f.s.UpdateLicense(f.ctx, f.lic, "plan_id"); err != nil {
+		t.Fatal(err)
 	}
 	// A licence Stripe bills already changes plan through change-plan.
 	f.lic.PaymentProvider, f.lic.StripeSubscriptionID = "stripe", "sub_billed_"+f.tag

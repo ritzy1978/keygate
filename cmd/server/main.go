@@ -414,6 +414,10 @@ func main() {
 	// Initialize thread-safe webhook secret with config value
 	stripeH.SetWebhookSecret(cfg.StripeWebhookSecret)
 	expiryChecker := service.NewExpiryChecker(db, emailSvc, webhookSvc, logger)
+	if cfg.StripeSecretKey != "" {
+		expiryChecker.EndPastDueUpgrade = stripeH.EndPastDueUpgrade
+		expiryChecker.EndGraceExpiredUpgrade = stripeH.EndGraceExpiredUpgrade
+	}
 	meteredSyncer := service.NewMeteredBillingSyncer(db, logger)
 	adminH := handler.NewAdminHandler(db, webhookSvc, emailSvc, expiryChecker, meteredSyncer)
 	// An update period may only be written once the links a public
@@ -892,10 +896,18 @@ func main() {
 			type portalLicense struct {
 				*model.License
 				LicenseKey string `json:"license_key"`
+				// Upgradable says the owner can upgrade it to a paid
+				// plan now (see StripeHandler.UpgradableLicenses).
+				Upgradable bool `json:"upgradable"`
+			}
+			upgradable, err := stripeH.UpgradableLicenses(c, emailStr, licenses)
+			if err != nil {
+				response.Internal(c, err)
+				return
 			}
 			out := make([]portalLicense, 0, len(licenses))
 			for _, l := range licenses {
-				out = append(out, portalLicense{License: l, LicenseKey: db.DecryptLicenseKey(l)})
+				out = append(out, portalLicense{License: l, LicenseKey: db.DecryptLicenseKey(l), Upgradable: upgradable[l.ID]})
 			}
 			// The portal hides the renewal button while the switch is
 			// off; the endpoint refuses the sale regardless.

@@ -16,6 +16,16 @@ type ExpiryChecker struct {
 	email   *EmailService
 	webhook *WebhookService
 	logger  *slog.Logger
+	// EndPastDueUpgrade, when set, is asked first about a licence the
+	// dunning sweep would expire. It handles one an upgrade moved onto
+	// the subscription (back to its free plan rather than expired) and
+	// reports whether it did. On an error the licence is left past due,
+	// so the next sweep tries again.
+	EndPastDueUpgrade func(ctx context.Context, lic *model.License, threshold time.Time) (bool, error)
+	// EndGraceExpiredUpgrade is the same for the grace sweep, which runs
+	// first and would otherwise expire an upgraded licence on its paid
+	// plan, out of the dunning sweep's reach.
+	EndGraceExpiredUpgrade func(ctx context.Context, lic *model.License, cutoff time.Time) (bool, error)
 }
 
 func NewExpiryChecker(s *store.Store, email *EmailService, wh *WebhookService, logger *slog.Logger) *ExpiryChecker {
@@ -70,6 +80,16 @@ func (c *ExpiryChecker) ExpireGracePeriodLicenses(ctx context.Context) {
 			// Re-checked in the write itself: an admin may have
 			// extended or reinstated the licence since it was read.
 			cutoff := time.Now().Add(-grace)
+			if c.EndGraceExpiredUpgrade != nil {
+				handled, err := c.EndGraceExpiredUpgrade(ctx, lic, cutoff)
+				if err != nil {
+					c.logger.Error("grace upgrade end failed; retried next sweep", "id", lic.ID, "error", err)
+					continue
+				}
+				if handled {
+					continue
+				}
+			}
 			ok, err := c.store.ExpireLicenseIf(ctx, lic.ID,
 				[]string{model.StatusActive, model.StatusPastDue}, &cutoff)
 			if err != nil {
@@ -143,6 +163,16 @@ func (c *ExpiryChecker) MarkPastDueAsExpired(ctx context.Context) {
 		return
 	}
 	for _, lic := range licenses {
+		if c.EndPastDueUpgrade != nil {
+			handled, err := c.EndPastDueUpgrade(ctx, lic, threshold)
+			if err != nil {
+				c.logger.Error("past_due upgrade end failed; retried next sweep", "id", lic.ID, "error", err)
+				continue
+			}
+			if handled {
+				continue
+			}
+		}
 		ok, err := c.store.ExpireStalePastDueLicenseIf(ctx, lic.ID, threshold)
 		if err != nil {
 			c.logger.Error("expire past_due failed", "id", lic.ID, "error", err)

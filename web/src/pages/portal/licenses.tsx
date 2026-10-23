@@ -114,13 +114,10 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // subscription. A one-time purchase has none: the backend answers 400
   // to each, so don't offer them.
   const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
-  // A licence Stripe doesn't bill (a free plan's) upgrades through a
-  // checkout and keeps its key. Suspended and revoked ones can't.
-  const canUpgrade =
-    isOwner &&
-    lic.payment_provider !== "stripe" &&
-    !lic.stripe_subscription_id &&
-    ["active", "trialing", "expired", "canceled"].includes(lic.status)
+  // A licence on a free plan upgrades through a checkout and keeps its
+  // key. The server says whether this one can (Stripe configured, a free
+  // plan, not suspended or revoked, and a paid plan to move to).
+  const canUpgrade = isOwner && lic.upgradable === true
 
   // Maintenance period of a perpetual license. The license never
   // expires; updates_until only bounds which releases may be installed.
@@ -913,7 +910,7 @@ function InvoicesDialog({ licenseId, onClose }: { licenseId: string; onClose: ()
 // licence moves to that plan.
 function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: () => void }) {
   const { t } = useI18n()
-  const { data: plansData } = useQuery({
+  const { data: plansData, isLoading } = useQuery({
     queryKey: ["portal", "plans", license.product_id],
     queryFn: () => portal.listPlans(license.product_id),
   })
@@ -946,7 +943,9 @@ function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: 
           <DialogDescription>{t("portal.upgradeDesc")}</DialogDescription>
         </DialogHeader>
         <DialogBody>
-          {plans.length === 0 ? (
+          {isLoading ? (
+            <p className="text-sm text-muted-foreground text-center py-4">{t("common.loading")}</p>
+          ) : plans.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-4">{t("portal.noUpgradePlans")}</p>
           ) : (
             <div className="space-y-2">

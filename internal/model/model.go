@@ -674,6 +674,44 @@ type LicenseRenewal struct {
 	CreatedAt time.Time `bun:",nullzero,default:now()" json:"created_at"`
 }
 
+// License upgrade states (LicenseUpgrade.State).
+const (
+	UpgradePending  = "pending"
+	UpgradeApplied  = "applied"
+	UpgradeReverted = "reverted"
+	UpgradeExpired  = "expired"
+	UpgradeRefunded = "refunded"
+	UpgradeVoid     = "void"
+)
+
+// LicenseUpgrade is one checkout that upgrades a licence Stripe does
+// not bill (a free plan's) to a paid plan. Applied, the From* fields
+// hold the licence as the upgrade found it, so a full refund or the end
+// of the subscription can put it back instead of revoking it.
+type LicenseUpgrade struct {
+	bun.BaseModel `bun:"table:license_upgrades"`
+
+	ID                      string     `bun:",pk" json:"id"`
+	LicenseID               string     `bun:",notnull" json:"license_id"`
+	ToPlanID                string     `bun:",nullzero" json:"to_plan_id,omitempty"`
+	State                   string     `bun:",notnull" json:"state"`
+	StripeCheckoutSessionID string     `bun:",notnull" json:"stripe_checkout_session_id"`
+	StripePaymentIntentID   string     `bun:",notnull,default:''" json:"stripe_payment_intent_id,omitempty"`
+	StripeSubscriptionID    string     `bun:",notnull,default:''" json:"stripe_subscription_id,omitempty"`
+	FromPlanID              string     `bun:",nullzero" json:"from_plan_id,omitempty"`
+	FromStatus              string     `bun:",notnull,default:''" json:"from_status,omitempty"`
+	FromValidUntil          *time.Time `json:"from_valid_until,omitempty"`
+	FromUpdatesUntil        *time.Time `json:"from_updates_until,omitempty"`
+	FromUpdatesTermsSet     bool       `bun:",notnull" json:"from_updates_terms_set"`
+	FromPaymentProvider     string     `bun:",notnull,default:''" json:"from_payment_provider,omitempty"`
+	FromStripeCustomerID    string     `bun:",notnull,default:''" json:"from_stripe_customer_id,omitempty"`
+	FromCanceledAt          *time.Time `json:"from_canceled_at,omitempty"`
+	EndReason               string     `bun:",notnull,default:''" json:"end_reason,omitempty"`
+	CreatedAt               time.Time  `bun:",nullzero,default:now()" json:"created_at"`
+	AppliedAt               *time.Time `json:"applied_at,omitempty"`
+	EndedAt                 *time.Time `json:"ended_at,omitempty"`
+}
+
 // Counts reports whether the renewal still contributes to the
 // license's maintenance period.
 func (r *LicenseRenewal) Counts() bool { return r.RefundedAt == nil && r.UpdatesUntil != nil }
@@ -755,6 +793,14 @@ func UpdatesUntilFor(licenseType string, days int, now time.Time) *time.Time {
 	}
 	until := now.Add(time.Duration(days) * 24 * time.Hour)
 	return &until
+}
+
+// IsFree reports whether Keygate charges nothing for the plan: no
+// purchase price, no update period and no renewals. It is the rule the
+// plans_self_signup_free constraint holds a self sign-up plan to, and
+// the one an upgrade checks the licence's current plan against.
+func (p *Plan) IsFree() bool {
+	return p.StripePriceID == "" && p.UpdatesDays == 0 && p.RenewalDays == 0 && p.StripeRenewalPriceID == ""
 }
 
 // InitialUpdatesUntil is the maintenance period a new license on this

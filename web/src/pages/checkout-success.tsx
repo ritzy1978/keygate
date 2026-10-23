@@ -9,7 +9,7 @@ import { checkout } from "@/lib/api"
 export default function CheckoutSuccessPage() {
   const { t } = useI18n()
   const { site_name, logo_url, attribution_text, attribution_url } = useSiteConfig()
-  const [status, setStatus] = useState<"loading" | "ok" | "error">("loading")
+  const [status, setStatus] = useState<"loading" | "ok" | "pending" | "not_applied" | "error">("loading")
   const [email, setEmail] = useState("")
   const [kind, setKind] = useState("")
 
@@ -24,7 +24,9 @@ export default function CheckoutSuccessPage() {
     checkout
       .verify(sessionId)
       .then((r) => {
-        setStatus(r.status === "ok" ? "ok" : "loading")
+        // Paid but not delivered yet: the sync finishes it, so say so
+        // rather than spin.
+        setStatus(r.status === "ok" || r.status === "not_applied" ? r.status : "pending")
         if (r.email) setEmail(r.email)
         setKind(r.kind ?? "")
       })
@@ -70,6 +72,18 @@ export default function CheckoutSuccessPage() {
                   </Button>
                 </>
               )}
+            </div>
+          )}
+          {(status === "pending" || status === "not_applied") && (
+            <div className="flex flex-col items-center gap-3 py-4">
+              <p className="text-muted-foreground">
+                {status === "pending" ? t("checkout.processing") : t("checkout.upgradeNotApplied")}
+              </p>
+              <Button className="mt-4" asChild>
+                <a href={kind === "renewal" || kind === "upgrade" ? "/portal" : "/login"}>
+                  {t("checkout.backToPortal")}
+                </a>
+              </Button>
             </div>
           )}
           {status === "error" && (

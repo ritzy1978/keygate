@@ -526,6 +526,8 @@ const zh = {
   "checkout.viewLicense": "查看我的许可证",
   "checkout.renewalSuccess": "更新期已延长。",
   "checkout.upgradeSuccess": "您的许可证已升级，密钥保持不变。",
+  "checkout.processing": "已收到您的付款，正在处理中。请过几分钟再查看您的许可证。",
+  "checkout.upgradeNotApplied": "升级未应用到此许可证。如果您已被扣款，请联系我们。",
   "checkout.backToPortal": "返回我的许可证",
 
   // Self sign-up

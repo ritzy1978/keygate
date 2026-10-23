@@ -541,6 +541,9 @@ const en = {
   "checkout.viewLicense": "View my license",
   "checkout.renewalSuccess": "Your update period has been extended.",
   "checkout.upgradeSuccess": "Your license has been upgraded. Your key stays the same.",
+  "checkout.processing":
+    "Your payment was received and is still being processed. Check your licenses again in a few minutes.",
+  "checkout.upgradeNotApplied": "The upgrade was not applied to this license. If you were charged, please contact us.",
   "checkout.backToPortal": "Back to my licenses",
 
   // Self sign-up

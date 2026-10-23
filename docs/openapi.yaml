@@ -503,20 +503,31 @@ paths:
   /portal/licenses/upgrade:
     post:
       tags: [License]
-      summary: Upgrade a license that Stripe doesn't bill to a paid plan (portal session)
+      summary: Upgrade a license on a free plan to a paid plan (portal session)
       description: |
-        For the license holder's own license on a plan with no Stripe
-        billing (a free plan, issued by an admin or through self sign-up).
-        Returns a Stripe Checkout URL for the target plan's price. When
-        the session is paid, the same license moves to that plan and is
-        linked to the Stripe subscription or payment: its key and
-        activations stay, and a `plan.changed` webhook fires.
+        For the license holder's own license on a free plan (no Stripe
+        price, update period or renewals) that Stripe doesn't bill yet,
+        issued by an admin or through self sign-up. Returns a Stripe
+        Checkout URL for the target plan's price. When the session is
+        paid, the same license moves to that plan and is linked to the
+        Stripe subscription or payment: its key and activations stay, and
+        a `plan.changed` webhook fires.
 
-        Targets are active plans of the same product with a Stripe price;
-        trial plans and plans selling an update period are not offered.
-        Suspended and revoked licenses cannot upgrade; expired and
-        canceled ones can. Requires a portal session cookie; the caller's
-        email must match the license's.
+        The upgrade can be undone, and the license goes back to its free
+        plan (same key, `plan.changed` with a `reason`) rather than being
+        revoked or canceled: on a full refund, when the subscription is
+        canceled or becomes unpaid, or when it stays past due for 30
+        days. In the last three cases, and for a refunded subscription,
+        the subscription is canceled in Stripe first.
+
+        Opening a new checkout expires one opened earlier for the same
+        license. Targets are active plans of the same product with a
+        Stripe price; trial plans and plans selling an update period are
+        not offered. Suspended and revoked licenses cannot upgrade;
+        expired and canceled ones can. Requires a portal session cookie;
+        the caller's email must match the license's. `GET
+        /portal/licenses` marks each license the caller can upgrade with
+        `upgradable: true`.
       requestBody:
         required: true
         content:
@@ -544,6 +555,10 @@ paths:
           description: "`UPGRADE_NOT_AVAILABLE`, the license or plan doesn't qualify"
         "403":
           description: Not the caller's license
+        "404":
+          description: License or plan not found
+        "409":
+          description: "`UPGRADE_IN_PROGRESS`, a checkout opened earlier for this license has been paid and is still being applied"
         "503":
           description: "`UPGRADE_UNAVAILABLE`, the plan's Stripe price can't be sold right now"
 
