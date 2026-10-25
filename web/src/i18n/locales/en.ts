@@ -135,6 +135,11 @@ const en = {
   "plans.hintHybrid": "Hybrid product — activations, seats, and release feeds are all available.",
   "plans.notApplicableForType": "Not applicable for this product type",
   "plans.trialDays": "Trial Days",
+  "plans.trialFallback": "When the trial ends, move to",
+  "plans.trialFallbackNone": "Nothing (the trial expires)",
+  "plans.trialFallbackNoLongerQualifies": "no longer qualifies: trials will expire",
+  "plans.trialFallbackHint":
+    "Licenses on this plan move to the chosen plan when their trial ends, keeping their key and activations, instead of expiring. Only free plans of this product can be chosen.",
   "plans.graceDays": "Grace Days",
   "plans.billingInterval": "Billing Interval",
   "plans.empty": "No plans yet",

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/tabloy/keygate/internal/model"
 )
@@ -568,6 +569,103 @@ func (s *Store) ExpireLicenseIf(ctx context.Context, id string, statuses []strin
 		}
 		return q
 	})
+}
+
+// IsTrialFallbackPlanConflict reports whether err is a plans CHECK
+// refusing trial_fallback_plan_id: on a plan that is not a trial plan,
+// or naming the plan itself. The admin API refuses both first; this is
+// the answer when concurrent edits slipped past it.
+func IsTrialFallbackPlanConflict(err error) bool {
+	var pgErr pgdriver.Error
+	return errors.As(err, &pgErr) && pgErr.Field('C') == "23514" &&
+		(pgErr.Field('n') == "plans_trial_fallback_trial_only" || pgErr.Field('n') == "plans_trial_fallback_not_self")
+}
+
+// TrialMove says what MoveEndedTrialToFallback did.
+type TrialMove struct {
+	// Moved: the licence is now on To, and From is the trial plan it
+	// left.
+	Moved bool
+	// Expire: the licence still qualifies for the trial sweep, but its
+	// plan names no fallback, or one that no longer qualifies (Refusal
+	// says why, for the log), or Stripe bills it. The caller expires it
+	// as it did before fallbacks existed.
+	Expire  bool
+	Refusal string
+	// FallbackPlanID is the plan the trial plan names, if any.
+	FallbackPlanID string
+	License        *model.License
+	From, To       *model.Plan
+}
+
+// MoveEndedTrialToFallback moves a licence whose trial ended before
+// before onto the plan its trial plan names in trial_fallback_plan_id,
+// in the shape that plan issues licences in: active, with no expiry and
+// no update period — the same re-shape an admin's change-plan gives a
+// licence leaving a trial. The key, activations, seats and add-ons stay
+// as they are, so the customer keeps working on the new plan.
+//
+// It locks the licence and re-checks it first: the sweep read it
+// earlier, and an admin may have extended, moved or reinstated it since
+// (neither Moved nor Expire is set then; nothing changed). The fallback
+// is locked against a concurrent edit and judged again here, as it
+// stands now, so a plan repriced after it was named can never be handed
+// out for nothing.
+//
+// A licence Stripe bills is left to Stripe, which owns its plan (see
+// the admin change-plan): it expires as before.
+func (s *Store) MoveEndedTrialToFallback(ctx context.Context, id string, before time.Time) (TrialMove, error) {
+	var out TrialMove
+	err := RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		out = TrialMove{}
+		lic, err := LockLicenseIn(ctx, tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if lic.Status != model.StatusTrialing || lic.ValidUntil == nil || !lic.ValidUntil.Before(before) {
+			return nil
+		}
+		from, err := FindPlanByIDIn(ctx, tx, lic.PlanID)
+		if err != nil {
+			return err
+		}
+		out.FallbackPlanID = from.TrialFallbackPlanID
+		if from.TrialFallbackPlanID == "" || lic.StripeSubscriptionID != "" {
+			out.Expire = true
+			return nil
+		}
+		// FOR SHARE: blocks an edit of the fallback (a new price, a
+		// new type) until this write commits, without blocking the
+		// key-share locks other licences take on it.
+		to := new(model.Plan)
+		err = tx.NewSelect().Model(to).Where("id = ?", from.TrialFallbackPlanID).For("SHARE").Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			out.Expire, out.Refusal = true, "plan not found"
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if why := to.TrialFallbackRefusal(lic.ProductID); why != "" {
+			out.Expire, out.Refusal = true, why
+			return nil
+		}
+		l := *lic
+		l.PlanID, l.Status, l.ValidUntil, l.UpdatesUntil = to.ID, model.StatusActive, nil, nil
+		if err := UpdateLicenseAndSupersedeRenewalsIn(ctx, tx, &l,
+			"plan_id", "status", "valid_until", "updates_until"); err != nil {
+			return err
+		}
+		if err := SyncLicenseSubscriptionIn(ctx, tx, l.ID, to, l.Status, nil); err != nil {
+			return err
+		}
+		out = TrialMove{Moved: true, FallbackPlanID: to.ID, License: &l, From: from, To: to}
+		return nil
+	})
+	return out, err
 }
 
 // ExpireStalePastDueLicenseIf is ExpireLicenseIf for the dunning sweep:

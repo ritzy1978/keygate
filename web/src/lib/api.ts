@@ -685,6 +685,9 @@ export interface Plan {
   signup_consent_text?: string
   max_seats: number
   trial_days: number
+  // Trial plans only: the free plan a licence moves to when its trial
+  // ends, instead of expiring. Absent = the trial expires.
+  trial_fallback_plan_id?: string
   grace_days: number
   stripe_price_id?: string
   // Maintenance period (perpetual plans): days of updates a purchase

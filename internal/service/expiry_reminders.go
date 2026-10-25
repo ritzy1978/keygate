@@ -157,8 +157,9 @@ func (c *ExpiryChecker) remindExpiring(ctx context.Context, lic *model.License, 
 	if lic.Product != nil {
 		productName = lic.Product.Name
 	}
+	trial := lic.Status == model.StatusTrialing
 	subject, body := c.email.RenderLicenseExpiring(productName, c.store.DecryptLicenseKey(lic),
-		lic.ValidUntil.Format("2006-01-02"), daysLeft(left), lic.Status == model.StatusTrialing)
+		lic.ValidUntil.Format("2006-01-02"), daysLeft(left), trial, c.trialFallbackName(ctx, lic, trial))
 	switch err := c.store.EnqueueEmailAndCloseNotification(ctx, lic.Email, subject, body, token); {
 	case err == nil:
 		c.logger.Info("expiry reminder queued", "license_id", lic.ID, "window_days", window)
@@ -176,4 +177,19 @@ func (c *ExpiryChecker) remindExpiring(ctx context.Context, lic *model.License, 
 // ExpiryReminderTag records one reminder window for one expiry date.
 func ExpiryReminderTag(validUntil time.Time, window int) string {
 	return fmt.Sprintf("expiry:%s:%dd", validUntil.UTC().Format(time.RFC3339), window)
+}
+
+// trialFallbackName is the name of the plan lic moves to when its trial
+// ends, as ExpireTrials will see it, or "" when the trial will simply
+// expire. A lookup failure says "" too: the reminder then reads as it
+// did before fallbacks existed, which is still true of the deadline.
+func (c *ExpiryChecker) trialFallbackName(ctx context.Context, lic *model.License, trial bool) string {
+	if !trial || lic.Plan == nil || lic.Plan.TrialFallbackPlanID == "" || lic.StripeSubscriptionID != "" {
+		return ""
+	}
+	to, err := c.store.FindPlanByID(ctx, lic.Plan.TrialFallbackPlanID)
+	if err != nil || to.TrialFallbackRefusal(lic.ProductID) != "" {
+		return ""
+	}
+	return to.Name
 }

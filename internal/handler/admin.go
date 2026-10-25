@@ -978,6 +978,7 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		SelfSignup           bool   `json:"self_signup"`
 		SignupDailyCap       int    `json:"signup_daily_cap"`
 		SignupConsentText    string `json:"signup_consent_text"`
+		TrialFallbackPlanID  string `json:"trial_fallback_plan_id"`
 		SortOrder            int    `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1097,6 +1098,14 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
+	req.TrialFallbackPlanID = strings.TrimSpace(req.TrialFallbackPlanID)
+	if problem, err := h.trialFallbackProblem(c, "", req.ProductID, req.LicenseType, req.TrialFallbackPlanID); err != nil {
+		response.Internal(c, err)
+		return
+	} else if problem != "" {
+		response.BadRequest(c, problem)
+		return
+	}
 	needsGatedFeed := maint.UpdatesDays > 0 || maint.StripeRenewalPriceID != ""
 	if needsGatedFeed && h.maintenanceGated(c) {
 		return
@@ -1125,6 +1134,7 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		SelfSignup:           req.SelfSignup,
 		SignupDailyCap:       req.SignupDailyCap,
 		SignupConsentText:    req.SignupConsentText,
+		TrialFallbackPlanID:  req.TrialFallbackPlanID,
 		Active:               true,
 		SortOrder:            req.SortOrder,
 	}
@@ -1138,6 +1148,10 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		}
 		if store.IsSelfSignupPlanConflict(err) {
 			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
+			return
+		}
+		if store.IsTrialFallbackPlanConflict(err) {
+			response.BadRequest(c, "trial_fallback_plan_id is only available on trial plans, and cannot be the plan itself")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1186,6 +1200,7 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		SelfSignup           *bool   `json:"self_signup"`
 		SignupDailyCap       *int    `json:"signup_daily_cap"`
 		SignupConsentText    *string `json:"signup_consent_text"`
+		TrialFallbackPlanID  *string `json:"trial_fallback_plan_id"`
 		Active               *bool   `json:"active"`
 		SortOrder            *int    `json:"sort_order"`
 	}
@@ -1414,6 +1429,28 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if h.stripePricesTaken(c, purchasePrice, maint.StripeRenewalPriceID, p.ID) {
 		return
 	}
+	// A plan that stops being a trial plan has no trials left to end,
+	// so its fallback goes with the type unless this request names one,
+	// which is then refused. Only a new value or a new type is checked:
+	// an edit of some other field must not fail because the plan
+	// already named has since been repriced. The expiry sweep checks it again anyway,
+	// and expires the trial instead of moving it to a plan that no
+	// longer qualifies.
+	fallback := p.TrialFallbackPlanID
+	if req.TrialFallbackPlanID != nil {
+		fallback = strings.TrimSpace(*req.TrialFallbackPlanID)
+	} else if licenseType != "trial" {
+		fallback = ""
+	}
+	if fallback != p.TrialFallbackPlanID || licenseType != p.LicenseType {
+		if problem, err := h.trialFallbackProblem(c, p.ID, p.ProductID, licenseType, fallback); err != nil {
+			response.Internal(c, err)
+			return
+		} else if problem != "" {
+			response.BadRequest(c, problem)
+			return
+		}
+	}
 	// While the switch is off a replica that predates this version may
 	// be running, and it enforces none of this: any write that leaves
 	// the plan selling an update period or renewals is refused, not
@@ -1445,6 +1482,10 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if req.SignupConsentText != nil {
 		p.SignupConsentText = consentText
 		cols = append(cols, "signup_consent_text")
+	}
+	if fallback != p.TrialFallbackPlanID {
+		p.TrialFallbackPlanID = fallback
+		cols = append(cols, "trial_fallback_plan_id")
 	}
 	if req.LicenseModel != nil {
 		p.LicenseModel = *req.LicenseModel
@@ -1496,6 +1537,10 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		}
 		if store.IsSelfSignupPlanConflict(err) {
 			response.BadRequest(c, "self_signup is only available on plans without a stripe_price_id, update period or renewals")
+			return
+		}
+		if store.IsTrialFallbackPlanConflict(err) {
+			response.BadRequest(c, "trial_fallback_plan_id is only available on trial plans, and cannot be the plan itself")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1994,6 +2039,33 @@ func validateSelfSignup(on bool, dailyCap int, consentText, stripePriceID string
 		return fmt.Errorf("self_signup is not available on plans that sell an update period or renewals")
 	}
 	return nil
+}
+
+// trialFallbackProblem says why targetID cannot be the plan that the
+// trial licences of plan planID (of productID, of licenseType) move to
+// when their trial ends, or "" when it can. An empty targetID means
+// none, which is always fine. err is a failed lookup, not a refusal.
+func (h *AdminHandler) trialFallbackProblem(c *gin.Context, planID, productID, licenseType, targetID string) (string, error) {
+	if targetID == "" {
+		return "", nil
+	}
+	if licenseType != "trial" {
+		return "trial_fallback_plan_id is only available on trial plans", nil
+	}
+	if targetID == planID {
+		return "trial_fallback_plan_id cannot be the plan itself", nil
+	}
+	target, err := h.Store.FindPlanByID(c, targetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "trial_fallback_plan_id: plan not found", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if why := target.TrialFallbackRefusal(productID); why != "" {
+		return "trial_fallback_plan_id " + why, nil
+	}
+	return "", nil
 }
 
 // validateScopes rejects unknown scope strings. Keeping the check at

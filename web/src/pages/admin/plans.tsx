@@ -418,6 +418,7 @@ function PlanDialog({
     self_signup: plan?.self_signup ?? false,
     signup_daily_cap: plan?.signup_daily_cap ?? 0,
     signup_consent_text: plan?.signup_consent_text || "",
+    trial_fallback_plan_id: plan?.trial_fallback_plan_id || "",
   })
 
   const set = (key: string, val: string | number | boolean) => setForm((f) => ({ ...f, [key]: val }))
@@ -450,6 +451,28 @@ function PlanDialog({
     queryFn: () => admin.getProduct(form.product_id),
     enabled: !!form.product_id && !plan?.product,
   })
+  // Plans a trial can fall back to when it ends: free, non-trial plans
+  // of the same product (mirrors model.Plan.TrialFallbackRefusal). The
+  // one already saved stays listed even if it no longer qualifies, so
+  // the form shows what the plan holds rather than silently dropping it,
+  // marked so the admin knows trials will expire instead (the sweep
+  // re-checks the plan and does not move them).
+  const isTrial = form.license_type === "trial"
+  const { data: siblingPlans } = useQuery({
+    queryKey: ["admin", "plans", "trial-fallback", form.product_id],
+    queryFn: () => admin.listPlans({ product_id: form.product_id, limit: 100 }),
+    enabled: isTrial && !!form.product_id,
+  })
+  const qualifiesAsFallback = (p: Plan) =>
+    p.id !== plan?.id &&
+    p.license_type !== "trial" &&
+    !p.stripe_price_id &&
+    !p.updates_days &&
+    !p.renewal_days &&
+    !p.stripe_renewal_price_id
+  const fallbackOptions = (siblingPlans?.plans ?? []).filter(
+    (p) => p.id === form.trial_fallback_plan_id || qualifiesAsFallback(p),
+  )
   const selectedProduct = plan?.product || pickedProduct
   const productType = selectedProduct?.type || "hybrid"
   const supports = {
@@ -484,6 +507,10 @@ function PlanDialog({
       payload.signup_daily_cap = plan?.signup_daily_cap ?? 0
       payload.signup_consent_text = plan?.signup_consent_text ?? ""
     }
+    // Only a trial plan has trials to end; the server clears it too.
+    if (!isTrial) {
+      payload.trial_fallback_plan_id = ""
+    }
     onSubmit(payload)
   }
 
@@ -512,7 +539,9 @@ function PlanDialog({
                   endpoint takes no product_id. */}
                 <ProductSelect
                   value={form.product_id}
-                  onChange={(v) => set("product_id", v)}
+                  // A fallback belongs to one product: picking another
+                  // product drops it rather than submit a hidden plan.
+                  onChange={(v) => setForm((f) => ({ ...f, product_id: v, trial_fallback_plan_id: "" }))}
                   current={plan?.product}
                   className="w-full"
                   disabled={!!plan}
@@ -644,6 +673,28 @@ function PlanDialog({
                   onChange={(e) => set("trial_days", Number(e.target.value))}
                 />
               </div>
+              {isTrial && (
+                <div className="space-y-2 sm:col-span-2">
+                  <Label>{t("plans.trialFallback")}</Label>
+                  <Select
+                    value={form.trial_fallback_plan_id || "none"}
+                    onValueChange={(v) => set("trial_fallback_plan_id", v === "none" ? "" : v)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{t("plans.trialFallbackNone")}</SelectItem>
+                      {fallbackOptions.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {qualifiesAsFallback(p) ? p.name : `${p.name} (${t("plans.trialFallbackNoLongerQualifies")})`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{t("plans.trialFallbackHint")}</p>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label>{t("plans.graceDays")}</Label>
                 <Input

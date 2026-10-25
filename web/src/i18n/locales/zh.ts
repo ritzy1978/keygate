@@ -131,6 +131,11 @@ const zh = {
   "plans.hintHybrid": "混合产品 — 激活、席位、自动更新 feed 全部可用。",
   "plans.notApplicableForType": "该产品类型不适用",
   "plans.trialDays": "试用天数",
+  "plans.trialFallback": "试用结束后转到",
+  "plans.trialFallbackNone": "无（试用到期）",
+  "plans.trialFallbackNoLongerQualifies": "已不符合条件：试用将到期",
+  "plans.trialFallbackHint":
+    "试用结束时，此方案的许可证将转到所选方案，并保留原有密钥和激活，而不是过期。只能选择此产品的免费方案。",
   "plans.graceDays": "宽限天数",
   "plans.billingInterval": "计费周期",
   "plans.empty": "暂无方案",

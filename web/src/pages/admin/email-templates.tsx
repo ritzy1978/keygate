@@ -27,7 +27,7 @@ const TEMPLATE_META: Record<string, { label: string; variables: string[] }> = {
   },
   license_expiring: {
     label: "License Expiring",
-    variables: ["Product", "LicenseKey", "ExpiresAt", "DaysLeft", "IsTrial", "SiteName", "PortalURL"],
+    variables: ["Product", "LicenseKey", "ExpiresAt", "DaysLeft", "IsTrial", "FallbackPlan", "SiteName", "PortalURL"],
   },
   updates_ending: {
     label: "Updates Ending",
@@ -61,6 +61,7 @@ const PREVIEW_DATA: Record<string, string> = {
   Reason: "Policy violation",
   DaysLeft: "3",
   IsTrial: "true",
+  FallbackPlan: "Free",
   DownloadURL: "https://example.com/download",
   InviteURL: "https://licenses.example.com/accept-invite?token=…",
   SiteName: "Acme Licensing",

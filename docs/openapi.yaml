@@ -4862,7 +4862,10 @@ webhooks:
 
         A license that an upgrade moved onto a subscription is not
         expired by the grace or past due sweeps: it goes back to its free
-        plan and `plan.changed` is sent instead.
+        plan and `plan.changed` is sent instead. Likewise a trial whose
+        plan names a fallback plan (`trial_fallback_plan_id`) is not
+        expired when it runs out: it moves to that plan and
+        `plan.changed` is sent with `reason: trial_ended`.
       parameters:
         - $ref: "#/components/parameters/WebhookEventHeader"
         - $ref: "#/components/parameters/WebhookSignatureHeader"
@@ -5185,6 +5188,9 @@ webhooks:
         license goes back to its free plan, `reason` says why:
         `refund`, `subscription_ended`, `subscription_unpaid`,
         `past_due_timeout`, `grace_period_ended` or `admin_canceled`.
+        `trial_ended`: the license's trial ran out and its trial plan
+        names a fallback plan (`trial_fallback_plan_id`), so it moved
+        there instead of expiring.
       parameters:
         - $ref: "#/components/parameters/WebhookEventHeader"
         - $ref: "#/components/parameters/WebhookSignatureHeader"
@@ -5205,7 +5211,7 @@ webhooks:
                         new_plan_id: { type: string, format: uuid }
                         reason:
                           type: string
-                          enum: [refund, subscription_ended, subscription_unpaid, past_due_timeout, grace_period_ended, admin_canceled]
+                          enum: [refund, subscription_ended, subscription_unpaid, past_due_timeout, grace_period_ended, admin_canceled, trial_ended]
       responses:
         "200":
           $ref: "#/components/responses/WebhookAck"

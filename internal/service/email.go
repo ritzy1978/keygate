@@ -680,13 +680,19 @@ func (s *EmailService) SendLicenseCreated(to, productName, planName, licenseKey,
 // out in daysLeft days, on expiresAt. The reminder job queues it (see
 // ExpiryChecker.remindExpiring) rather than sending it, for the reasons
 // RenderUpdatesEnding gives.
-func (s *EmailService) RenderLicenseExpiring(productName, licenseKey, expiresAt string, daysLeft int, trial bool) (subject, body string) {
+//
+// fallbackPlan is the plan a trial moves to when it ends (the trial
+// plan's TrialFallbackPlanID), or "" when it simply expires: the
+// reminder must not tell a customer they will lose access when they
+// will in fact carry on, on that plan.
+func (s *EmailService) RenderLicenseExpiring(productName, licenseKey, expiresAt string, daysLeft int, trial bool, fallbackPlan string) (subject, body string) {
 	body = s.renderEmail("license_expiring", tmplLicenseExpiring, s.templateData(map[string]any{
-		"Product":    productName,
-		"LicenseKey": licenseKey,
-		"ExpiresAt":  expiresAt,
-		"DaysLeft":   daysLeft,
-		"IsTrial":    trial,
+		"Product":      productName,
+		"LicenseKey":   licenseKey,
+		"ExpiresAt":    expiresAt,
+		"DaysLeft":     daysLeft,
+		"IsTrial":      trial,
+		"FallbackPlan": fallbackPlan,
 	}))
 	subject = productName + " license expiring soon"
 	if trial {
@@ -1136,7 +1142,7 @@ var templateSample = map[string]any{
 	"Product": "Product", "Plan": "Pro", "LicenseKey": "KEY", "ExpiresAt": "2026-01-01",
 	"UpdatesUntil": "2026-01-01", "Feature": "api_calls", "Used": int64(80), "Limit": int64(100),
 	"Pct": 80, "Inviter": "a@example.com", "InviteURL": "https://example.com/i", "Reason": "reason",
-	"DaysLeft": 3, "IsTrial": true, "DownloadURL": "https://example.com/d", "SiteName": "Site",
+	"DaysLeft": 3, "IsTrial": true, "FallbackPlan": "Free", "DownloadURL": "https://example.com/d", "SiteName": "Site",
 	"PortalURL": "https://example.com/portal", "Role": "admin", "LoginURL": "https://example.com/login",
 }
 
@@ -1186,7 +1192,7 @@ const tmplLicenseExpiring = `<!DOCTYPE html>
 <h2 style="color: #111;">{{if .IsTrial}}Trial{{else}}License{{end}} Expiring Soon</h2>
 <p>Your <strong>{{.Product}}</strong> {{if .IsTrial}}trial{{else}}license{{end}} expires on <strong>{{.ExpiresAt}}</strong> (days remaining: {{.DaysLeft}}).</p>
 <p>License key: <code>{{.LicenseKey}}</code></p>
-<p>{{if .IsTrial}}Choose a plan before then to keep using it.{{else}}Please renew to avoid service interruption.{{end}}</p>
+<p>{{if .IsTrial}}{{if .FallbackPlan}}After that it moves to the <strong>{{.FallbackPlan}}</strong> plan. Choose a paid plan before then to keep everything the trial includes.{{else}}Choose a plan before then to keep using it.{{end}}{{else}}Please renew to avoid service interruption.{{end}}</p>
 </body></html>`
 
 const tmplUpdatesEnding = `<!DOCTYPE html>
