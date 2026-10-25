@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, Copy, Key, Trash2 } from "lucide-react"
-import { useState } from "react"
+import { useState, useSyncExternalStore } from "react"
 import { showToast } from "@/components/toast"
 import {
   AlertDialog,
@@ -17,7 +17,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
@@ -25,6 +24,8 @@ import { type TranslationKeys, useI18n } from "@/i18n"
 import {
   type Activation,
   type Entitlement,
+  errorCode,
+  errorDetails,
   type Invoice,
   type Plan,
   type PortalLicense,
@@ -32,12 +33,16 @@ import {
   type Seat,
 } from "@/lib/api"
 import { cn, formatDate, statusColor } from "@/lib/utils"
+import { PendingChangeNotice, SubscriptionChangeDialog } from "./subscription-change"
 
 export default function PortalLicensesPage() {
   const { t } = useI18n()
   const { data, isLoading } = useQuery({
     queryKey: ["portal", "licenses"],
     queryFn: portal.licenses,
+    // Coming back from Stripe's page in another tab, show what was paid,
+    // however recently the list was read.
+    refetchOnWindowFocus: "always",
   })
 
   const licenses = data?.licenses || []
@@ -83,6 +88,13 @@ export default function PortalLicensesPage() {
   )
 }
 
+// changedElsewhere: a 404 on something the page shows, which means it
+// changed since the page loaded (the license key replaced in another
+// tab or by an admin, a member or device already removed).
+function changedElsewhere(e: Error) {
+  return ["NOT_FOUND", "LICENSE_NOT_FOUND", "SEAT_NOT_FOUND"].includes(errorCode(e) ?? "")
+}
+
 function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense; renewalsEnabled: boolean }) {
   const { t } = useI18n()
   const { user } = useAuth()
@@ -93,19 +105,24 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   const [copied, setCopied] = useState(false)
   const [showInvoices, setShowInvoices] = useState(false)
   const [showChangePlan, setShowChangePlan] = useState(false)
+  const [showChangeSeats, setShowChangeSeats] = useState(false)
   const [showUpgrade, setShowUpgrade] = useState(false)
   const [showCancel, setShowCancel] = useState(false)
   const productType = lic.product?.type || "perpetual"
   const showUsage = productType === "saas" || productType === "hybrid"
   // Seats UI shows for any plan that *could* have more than one person.
-  // max_seats counts the owner and 0 means "no limit", so max_seats=1
-  // is a single-seat license, hidden unless it somehow has members
-  // already (the owner must still be able to see and remove them).
+  // The seat limit counts the owner and 0 means "no limit", so 1 is a
+  // single-seat license, hidden unless it somehow has members already
+  // (the owner must still be able to see and remove them). A plan sold
+  // per seat always shows it: buying more seats is how it grows.
   // Perpetual products don't have a portal-managed team, so gate on
-  // product type too.
-  const seatCap = lic.plan?.max_seats ?? 0
+  // product type too. The limit is the server's: on a plan sold per
+  // seat it is the seats bought, not the plan's max_seats.
+  const seatCap = lic.seat_limit ?? lic.plan?.max_seats ?? 0
+  const activationCap = lic.activation_limit ?? lic.plan?.max_activations ?? 0
+  const perSeat = !!lic.plan?.per_seat
   const hasMembers = (lic.seats ?? []).some((s) => !s.removed_at && s.email.toLowerCase() !== lic.email?.toLowerCase())
-  const showSeats = (productType === "saas" || productType === "hybrid") && (seatCap !== 1 || hasMembers)
+  const showSeats = (productType === "saas" || productType === "hybrid") && (seatCap !== 1 || hasMembers || perSeat)
 
   const copyKey = () => {
     navigator.clipboard.writeText(lic.license_key)
@@ -117,6 +134,14 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
   // subscription. A one-time purchase has none: the backend answers 400
   // to each, so don't offer them.
   const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
+  // Seats bought through Stripe are changed in the portal by the owner.
+  // A plan sold in one fixed number of seats has nothing to change.
+  const canChangeSeats =
+    isOwner &&
+    hasSubscription &&
+    perSeat &&
+    (lic.plan?.min_quantity ?? 1) < (lic.plan?.max_quantity ?? 100) &&
+    (lic.status === "active" || lic.status === "trialing")
   // A licence on a free plan upgrades through a checkout and keeps its
   // key. The server says whether this one can (Stripe configured, a free
   // plan, not suspended or revoked, and a paid plan to move to).
@@ -185,6 +210,13 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
           </Button>
         </div>
+        {!isOwner && <p className="text-xs text-muted-foreground -mt-2">{t("portal.memberKeyHint")}</p>}
+        {/* Over the seat limit: the key is shown, and why it does not work. */}
+        {!isOwner && lic.key_paused && (
+          <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:bg-amber-950/30">
+            {t("portal.keyPaused")}
+          </p>
+        )}
 
         {/* Overview stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -196,19 +228,44 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             <p className="text-muted-foreground">{t("licenses.validUntil")}</p>
             <p className="font-medium">{formatDate(lic.valid_until)}</p>
           </div>
+          {/* The count and cap are the team's: a member is told so, as
+              the list below holds only their own devices. */}
           <div>
-            <p className="text-muted-foreground">{t("licenses.activations")}</p>
+            <p className="text-muted-foreground">{t(isOwner ? "portal.devices" : "portal.teamDevices")}</p>
             <p className="font-medium">
-              {lic.activations?.length || 0} / {lic.plan?.max_activations || "-"}
+              {lic.activation_count ?? lic.activations?.length ?? 0} / {activationCap || "-"}
             </p>
           </div>
-          {showSeats && (
+          {/* A member sees who has joined, not pending invitations, so
+              a count of seats in use is the owner's to see. */}
+          {showSeats && isOwner && (
             <div>
               <p className="text-muted-foreground">{t("licenses.seats")}</p>
-              <p className="font-medium">{seatCap === 0 ? t("common.unlimited") : seatCap}</p>
+              <p className="font-medium">
+                {seatCap === 0
+                  ? t("common.unlimited")
+                  : `${(lic.seats ?? []).filter((s) => !s.removed_at && s.email.toLowerCase() !== lic.email?.toLowerCase()).length + 1} / ${seatCap}`}
+              </p>
+            </div>
+          )}
+          {perSeat && !showSeats && (
+            <div>
+              <p className="text-muted-foreground">{t("portal.seatsBought")}</p>
+              <p className="font-medium">{lic.quantity ?? 1}</p>
             </div>
           )}
         </div>
+
+        {isOwner && <PendingChangeNotice license={lic} />}
+        {/* Set to end: it runs to the date it is paid to, then stops. */}
+        {isOwner &&
+          lic.cancel_scheduled &&
+          lic.valid_until &&
+          ["active", "trialing", "past_due"].includes(lic.status) && (
+            <p className="rounded-lg border px-3 py-2 text-sm text-muted-foreground">
+              {t("portal.endsOn").replace("{date}", formatDate(lic.valid_until))}
+            </p>
+          )}
 
         {/* Maintenance period */}
         {isPerpetualPlan && (
@@ -252,6 +309,11 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
                 {t("portal.updatePayment")}
               </Button>
             )}
+            {canChangeSeats && (
+              <Button variant="outline" size="sm" onClick={() => setShowChangeSeats(true)}>
+                {t("portal.changeSeats")}
+              </Button>
+            )}
             {hasSubscription && (lic.status === "active" || lic.status === "trialing") && (
               <>
                 <Button variant="outline" size="sm" onClick={() => setShowChangePlan(true)}>
@@ -270,7 +332,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
         {/* Tabs for detailed sections */}
         <Tabs value={activeTab} onValueChange={setTab}>
           <TabsList>
-            <TabsTrigger value="overview">{t("licenses.activations")}</TabsTrigger>
+            <TabsTrigger value="overview">{t("portal.devices")}</TabsTrigger>
             <TabsTrigger value="entitlements">{t("plans.entitlements")}</TabsTrigger>
             {showUsage && <TabsTrigger value="usage">{t("analytics.usage")}</TabsTrigger>}
             {showSeats && <TabsTrigger value="seats">{t("portal.teamMembers")}</TabsTrigger>}
@@ -292,7 +354,15 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
 
           {showSeats && (
             <TabsContent value="seats" className="mt-4">
-              <SeatsSection license={lic} />
+              {/* More seats only where the plan sells more than the licence has. */}
+              <SeatsSection
+                license={lic}
+                onAddSeats={
+                  canChangeSeats && (lic.quantity ?? 1) < (lic.plan?.max_quantity ?? 100)
+                    ? () => setShowChangeSeats(true)
+                    : undefined
+                }
+              />
             </TabsContent>
           )}
         </Tabs>
@@ -302,6 +372,7 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
             licenseId={lic.id}
             provider={lic.payment_provider || ""}
             productName={lic.product?.name || ""}
+            scheduled={!!lic.cancel_scheduled}
             onClose={() => setShowCancel(false)}
           />
         )}
@@ -309,6 +380,9 @@ function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense
         {showInvoices && <InvoicesDialog licenseId={lic.id} onClose={() => setShowInvoices(false)} />}
 
         {showChangePlan && <ChangePlanDialog license={lic} onClose={() => setShowChangePlan(false)} />}
+        {showChangeSeats && lic.plan && (
+          <SubscriptionChangeDialog license={lic} target={lic.plan} onClose={() => setShowChangeSeats(false)} />
+        )}
         {showUpgrade && <UpgradeDialog license={lic} onClose={() => setShowUpgrade(false)} />}
       </CardContent>
     </Card>
@@ -319,26 +393,31 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   const { t } = useI18n()
   const { user } = useAuth()
   const qc = useQueryClient()
+  // The device asked about stays set while the dialog closes, so its
+  // text does not change under the closing animation.
   const [removing, setRemoving] = useState<Activation | null>(null)
+  const [confirming, setConfirming] = useState(false)
 
   // The dedicated activations endpoint requires the caller to be the
-  // license owner OR an *accepted* seat (portal_activations.go:84 —
+  // license owner OR an *accepted* seat (portal_activations.go —
   // "pending invites confer no authority", a deliberate security
-  // gate). But /portal/licenses still lists the license for a
-  // PENDING (unaccepted) seat too, so naively calling the endpoint
-  // here would 404 and render a false "no devices" for a license we
-  // just showed. Decide authorisation from the embedded data first;
-  // only hit the gated endpoint when authorised. Unauthorised users
-  // fall back to the read-only embedded list (the prior behaviour —
-  // no regression, no false-empty, no delete controls).
+  // gate). /portal/licenses lists a licence only to those, but decide
+  // from the embedded data anyway and fall back to the read-only
+  // embedded list otherwise, so a stale page never claims "no
+  // devices". A member sees, and removes, the devices their own key
+  // activated; the owner sees everyone's, and whose each is.
   const myEmail = user?.email?.toLowerCase() ?? ""
   const isOwner = !!myEmail && license.email?.toLowerCase() === myEmail
-  const mySeat = (license.seats || []).find((s) => s.email.toLowerCase() === myEmail && !s.removed_at)
-  const isAcceptedSeat = !!mySeat?.accepted_at
+  // An accepted seat at the viewer's address, should one made before
+  // addresses were lower-cased leave a pending one beside it.
+  const isAcceptedSeat = (license.seats || []).some(
+    (s) => s.email.toLowerCase() === myEmail && !s.removed_at && !!s.accepted_at,
+  )
   const authorized = isOwner || isAcceptedSeat
+  const ownOnly = !isOwner
 
   const actQuery = useQuery({
-    queryKey: ["portal", "activations", license.id],
+    queryKey: ["portal", "activations", license.id, license.license_key],
     queryFn: () => portal.listActivations(license.license_key),
     enabled: authorized,
   })
@@ -348,36 +427,38 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   // manage path below.
   const removeMut = useMutation({
     mutationFn: (activationId: string) => portal.removeActivation(license.license_key, activationId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["portal", "activations", license.id] })
-      // The card header's "N / max" count is rendered from
-      // lic.activations, which comes from the separate
-      // ["portal","licenses"] query — invalidate it too, else the
-      // header keeps showing the pre-delete count while the list
-      // below already dropped the row.
-      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
-    },
-    // Errors surface via the global MutationCache toast (main.tsx).
-    // Just close the dialog either way so the row doesn't get stuck.
+    meta: { ownErrors: true },
+    onError: (e: Error) => showToast(changedElsewhere(e) ? t("portal.changedElsewhere") : e.message, "error"),
+    // Read the list again either way: a device already gone (its
+    // member removed, the key changed) must not stay on screen. The
+    // card header's "N / max" count is rendered from lic.activations,
+    // which comes from the separate ["portal","licenses"] query, so
+    // that is read again too. Close the dialog either way.
     onSettled: () => {
-      setRemoving(null)
+      qc.invalidateQueries({ queryKey: ["portal", "activations", license.id] })
+      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      setConfirming(false)
     },
-    onError: (e: Error) => showToast(e.message, "error"),
   })
 
-  // Read-only path for unauthorised (pending-seat) viewers, and a
-  // defensive fallback if the gated query errors for an authorised
-  // user (race / transient). Uses the activations embedded in the
-  // ["portal","licenses"] payload, which is populated regardless of
-  // seat-accept state — so we never claim "no devices" falsely.
+  // Read-only fallback if the gated query errors (race / transient), or
+  // for a viewer the page does not take for authorised. Uses the
+  // activations embedded in the ["portal","licenses"] payload, which
+  // the server has already narrowed to what this viewer may see — so we
+  // never claim "no devices" falsely.
   const useReadOnly = !authorized || actQuery.isError
   if (useReadOnly) {
     const embedded = license.activations || []
     return (
       <div className="space-y-3">
         <p className="text-sm font-medium">
-          {t("portal.activeDevices")} ({embedded.length}
-          {license.plan?.max_activations ? `/${license.plan.max_activations}` : ""})
+          {ownOnly
+            ? `${t("portal.myDevices")} (${embedded.length})`
+            : `${t("portal.devices")} (${embedded.length}${
+                (license.activation_limit ?? license.plan?.max_activations)
+                  ? `/${license.activation_limit ?? license.plan?.max_activations}`
+                  : ""
+              })`}
         </p>
         {embedded.length === 0 ? (
           <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.noDevices")}</p>
@@ -393,6 +474,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     {t("portal.lastVerified")} {formatDate(act.last_verified)}
+                    {!ownOnly && act.member_email && ` · ${t("portal.deviceOfMember", { email: act.member_email })}`}
                   </p>
                 </div>
               </div>
@@ -404,14 +486,18 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
   }
 
   const activations = actQuery.data?.activations || []
-  const max = actQuery.data?.max ?? 0
+  // The licence's limit, as the card shows it: read again with the
+  // licence (on focus too), so a change paid in Stripe's tab shows here
+  // as on the card.
+  const max = license.activation_limit ?? actQuery.data?.max ?? 0
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">
-          {t("portal.activeDevices")} ({activations.length}
-          {max > 0 ? `/${max}` : ""})
+          {ownOnly
+            ? `${t("portal.myDevices")} (${activations.length})`
+            : `${t("portal.devices")} (${activations.length}${max > 0 ? `/${max}` : ""})`}
         </p>
       </div>
 
@@ -431,6 +517,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                 </div>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {t("portal.lastVerified")} {formatDate(act.last_verified)}
+                  {!ownOnly && act.member_email && ` · ${t("portal.deviceOfMember", { email: act.member_email })}`}
                 </p>
               </div>
               <Button
@@ -438,7 +525,10 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
                 size="icon"
                 className="h-7 w-7 shrink-0 text-destructive"
                 disabled={removeMut.isPending && removeMut.variables === act.id}
-                onClick={() => setRemoving(act)}
+                onClick={() => {
+                  setRemoving(act)
+                  setConfirming(true)
+                }}
                 aria-label={t("portal.removeDevice")}
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -448,7 +538,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
         </div>
       )}
 
-      <AlertDialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
+      <AlertDialog open={confirming} onOpenChange={(o) => !o && setConfirming(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("portal.removeDeviceTitle")}</AlertDialogTitle>
@@ -503,12 +593,55 @@ function EntitlementsSection({ entitlements }: { entitlements: Entitlement[] }) 
   )
 }
 
-function SeatsSection({ license }: { license: PortalLicense }) {
+// Resends by seat: in flight, or just made and resting until a time.
+// Kept outside the component so a resend still rests after the Members
+// tab is left and shown again (the tab unmounts it), and so each row
+// keeps its own state while another row is sending.
+const resends = new Map<string, "sending" | number>()
+const resendListeners = new Set<() => void>()
+let resendVersion = 0
+
+function setResend(seatID: string, state: "sending" | number | undefined) {
+  if (state === undefined) resends.delete(seatID)
+  else resends.set(seatID, state)
+  resendVersion++
+  for (const l of resendListeners) l()
+}
+
+// markSent rests a seat's Resend button after an email went out.
+function markSent(seatID: string) {
+  const until = Date.now() + RESEND_SENT_MS
+  setResend(seatID, until)
+  setTimeout(() => {
+    if (resends.get(seatID) === until) setResend(seatID, undefined)
+  }, RESEND_SENT_MS)
+}
+
+function resendState(seatID: string): "idle" | "sending" | "sent" {
+  const s = resends.get(seatID)
+  if (s === "sending") return "sending"
+  return typeof s === "number" && s > Date.now() ? "sent" : "idle"
+}
+
+function useResends() {
+  return useSyncExternalStore(
+    (onChange) => {
+      resendListeners.add(onChange)
+      return () => resendListeners.delete(onChange)
+    },
+    () => resendVersion,
+  )
+}
+
+function SeatsSection({ license, onAddSeats }: { license: PortalLicense; onAddSeats?: () => void }) {
   const { t } = useI18n()
   const { user } = useAuth()
   const qc = useQueryClient()
   const [showInvite, setShowInvite] = useState(false)
+  // The seat asked about stays set while the dialog closes, so its text
+  // does not change under the closing animation.
   const [removing, setRemoving] = useState<Seat | null>(null)
+  const [confirming, setConfirming] = useState(false)
 
   const seatsQuery = useQuery({
     queryKey: ["portal", "seats", license.id],
@@ -517,18 +650,58 @@ function SeatsSection({ license }: { license: PortalLicense }) {
 
   const removeMut = useMutation({
     mutationFn: (seatId: string) => portal.removeSeat({ license_key: license.license_key, seat_id: seatId }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
-      // The license list carries the seats that decide whether the team
-      // tab shows at all.
-      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
-      setRemoving(null)
-    },
-    // Errors surface via the global MutationCache toast handler in
-    // main.tsx — no per-mutation onError needed, else we'd double-
-    // toast. Just close the dialog on failure so the row stays put.
+    meta: { ownErrors: true },
+    onSuccess: () =>
+      showToast(t(removing?.accepted_at ? "licenses.memberRemoved" : "licenses.inviteCancelled"), "success"),
+    onError: (e: Error) => showToast(changedElsewhere(e) ? t("portal.changedElsewhere") : e.message, "error"),
+    // Read the team again either way. The license list carries the
+    // seats that decide whether the team tab shows at all, and the
+    // member's devices went with them. Close the dialog either way.
     onSettled: () => {
-      setRemoving(null)
+      qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
+      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      qc.invalidateQueries({ queryKey: ["portal", "activations", license.id] })
+      setConfirming(false)
+    },
+  })
+
+  // Resending is inviting the same address again: the server renews the
+  // pending invite's link and mails it, even at the seat limit. Accepted
+  // in the meantime, the seat comes back as it is and nothing is sent.
+  // Each send replaces the link the last one mailed, so the button says
+  // "Sent" for a few seconds before it can be pressed again: a second
+  // click straight away would only void the first email.
+  useResends()
+  const resendMut = useMutation({
+    mutationFn: (seat: Seat) => portal.addSeat({ license_key: license.license_key, email: seat.email }),
+    meta: { ownErrors: true },
+    onMutate: (seat) => setResend(seat.id, "sending"),
+    onSuccess: (seat, sent) => {
+      showToast(
+        t(seat.accepted_at ? "portal.inviteAlreadyJoined" : "portal.inviteResent").replace("{email}", seat.email),
+        "success",
+      )
+      if (seat.accepted_at) setResend(sent.id, undefined)
+      else markSent(sent.id)
+    },
+    // Cancelled elsewhere, sending it again is a new invite, which a full
+    // team or an open upgrade checkout refuses.
+    onError: (e: Error, seat) => {
+      setResend(seat.id, undefined)
+      showToast(
+        errorCode(e) === "UPGRADE_IN_PROGRESS"
+          ? t("portal.inviteDuringUpgrade")
+          : errorCode(e) === "SEAT_LIMIT"
+            ? t("portal.inviteSeatLimit")
+            : changedElsewhere(e)
+              ? t("portal.changedElsewhere")
+              : e.message,
+        "error",
+      )
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
+      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
     },
   })
 
@@ -538,37 +711,79 @@ function SeatsSection({ license }: { license: PortalLicense }) {
   const ownerEmail = license.email?.toLowerCase() ?? ""
   const members = seats.filter((s) => s.email.toLowerCase() !== ownerEmail)
   // People on the license: the members plus the owner, who holds a seat
-  // without a row, as max_seats counts them on the server.
+  // without a row, as max_seats counts them on the server. A member is
+  // sent only those who have joined, so they see no limit beside it.
   const activeCount = members.filter((s) => !s.removed_at).length + 1
+  // Members beyond the seat limit (the last to join) whose keys wait for
+  // a free place.
+  const pausedCount = members.filter((s) => s.paused).length
   // maxSeats=0 means "no limit"; never gate the Add button in that case.
-  const maxSeats = license.plan?.max_seats ?? 0
+  // The server's limit: the seats bought, on a plan sold per seat.
+  const maxSeats = license.seat_limit ?? license.plan?.max_seats ?? 0
   const atLimit = maxSeats > 0 && activeCount >= maxSeats
 
-  // canManage mirrors backend portalSeatMutationGuard: the license
-  // owner (matched by email, case-insensitive) OR an accepted seat
-  // with role=admin. Members and unaccepted invites only see the
-  // roster; hiding the buttons prevents the "click → mystery 404 →
-  // generic toast" UX failure mode.
+  // canManage mirrors backend portalSeatMutationGuard: only the license
+  // owner (matched by email, case-insensitive) manages the team.
+  // Members only see the roster; hiding the buttons prevents the
+  // "click → mystery 404 → generic toast" UX failure mode.
   const myEmail = user?.email?.toLowerCase() ?? ""
-  const isLicenseOwner = !!myEmail && license.email?.toLowerCase() === myEmail
-  const mySeat = seats.find((s) => s.email.toLowerCase() === myEmail && !s.removed_at)
-  const isAcceptedAdmin = !!mySeat?.accepted_at && mySeat.role === "admin"
-  const canManage = isLicenseOwner || isAcceptedAdmin
+  const canManage = !!myEmail && license.email?.toLowerCase() === myEmail
+  // Invites need a license in use, by the rule the server holds them to
+  // (LicenseUsable): an active one up to its end plus the plan's grace
+  // days, a canceled one up to its end. The team is still listed, and
+  // members removed, whatever its state.
+  const until = license.valid_until ? new Date(license.valid_until).getTime() : null
+  const graceMs = (license.plan?.grace_days ?? 7) * 24 * 60 * 60 * 1000
+  const inUse =
+    (["active", "trialing", "past_due"].includes(license.status) &&
+      (until === null || Date.now() <= until + graceMs)) ||
+    (license.status === "canceled" && until !== null && Date.now() < until)
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">
-          {t("portal.teamMembers")} ({activeCount}/{maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats})
+          {t("portal.teamMembers")} (
+          {canManage ? `${activeCount}/${maxSeats === 0 ? t("common.unlimitedSymbol") : maxSeats}` : activeCount})
         </p>
         {canManage && (
-          <Button size="sm" disabled={atLimit} onClick={() => setShowInvite(true)}>
+          <Button size="sm" disabled={atLimit || !inUse} onClick={() => setShowInvite(true)}>
             {t("portal.addMember")}
           </Button>
         )}
       </div>
 
-      {canManage && atLimit && <p className="text-xs text-muted-foreground">{t("portal.seatLimit")}</p>}
+      {canManage && !inUse && <p className="text-xs text-muted-foreground">{t("portal.inviteNeedsActive")}</p>}
+      {canManage && pausedCount > 0 && (
+        <p className="text-xs text-amber-700">{t("portal.pausedMembers").replace("{count}", String(pausedCount))}</p>
+      )}
+
+      {canManage && inUse && atLimit && (
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="space-y-0.5 text-xs text-muted-foreground">
+            <p>
+              {onAddSeats
+                ? t("portal.seatLimitBuyMore")
+                : !license.plan?.per_seat
+                  ? t("portal.seatLimit")
+                  : license.stripe_subscription_id && license.status === "past_due"
+                    ? t("portal.seatLimitSettleFirst")
+                    : t("portal.seatLimitFull")}
+            </p>
+            {/* Cancelling an invitation frees a seat for a new one, but
+                does not let a paused member back: pausing counts only
+                those who joined. */}
+            {pausedCount === 0 && members.some((s) => !s.removed_at && !s.accepted_at) && (
+              <p>{t("portal.seatLimitPendingHint")}</p>
+            )}
+          </div>
+          {onAddSeats && (
+            <Button size="sm" variant="outline" onClick={onAddSeats}>
+              {t("portal.addSeats")}
+            </Button>
+          )}
+        </div>
+      )}
 
       {seatsQuery.isLoading ? (
         <div className="h-16 animate-pulse bg-muted rounded-lg" />
@@ -588,8 +803,13 @@ function SeatsSection({ license }: { license: PortalLicense }) {
               key={s.id}
               seat={s}
               canManage={canManage}
-              onRemove={() => setRemoving(s)}
+              onRemove={() => {
+                setRemoving(s)
+                setConfirming(true)
+              }}
               isRemoving={removeMut.isPending && removeMut.variables === s.id}
+              onResend={canManage && inUse ? () => resendMut.mutate(s) : undefined}
+              resendState={resendState(s.id)}
             />
           ))}
         </div>
@@ -597,21 +817,28 @@ function SeatsSection({ license }: { license: PortalLicense }) {
 
       {showInvite && <InviteSeatDialog license={license} onClose={() => setShowInvite(false)} />}
 
-      <AlertDialog open={!!removing} onOpenChange={(o) => !o && setRemoving(null)}>
+      <AlertDialog open={confirming} onOpenChange={(o) => !o && setConfirming(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("portal.removeMemberTitle")}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t(removing?.accepted_at ? "portal.removeMemberTitle" : "portal.cancelInviteTitle")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {t("portal.removeMemberDesc").replace("{email}", removing?.email || "")}
+              {t(removing?.accepted_at ? "portal.removeMemberDesc" : "portal.cancelInviteDesc").replace(
+                "{email}",
+                removing?.email || "",
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="flex justify-end gap-2">
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            {/* "Cancel" beside "Cancel invitation" reads as the same
+                thing; a pending invite's dialog says what dismissing does. */}
+            <AlertDialogCancel>{t(removing?.accepted_at ? "common.cancel" : "portal.keepInvite")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-white hover:bg-destructive/90"
               onClick={() => removing && removeMut.mutate(removing.id)}
             >
-              {t("portal.removeMember")}
+              {t(removing?.accepted_at ? "portal.removeMember" : "portal.cancelInvite")}
             </AlertDialogAction>
           </div>
         </AlertDialogContent>
@@ -620,30 +847,46 @@ function SeatsSection({ license }: { license: PortalLicense }) {
   )
 }
 
+// How long a resent invite's button says "Sent" (see resendMut).
+const RESEND_SENT_MS = 10_000
+
 function SeatRow({
   seat,
   canManage,
   onRemove,
   isRemoving,
+  onResend,
+  resendState,
 }: {
   seat: Seat
   canManage: boolean
   onRemove: () => void
   isRemoving: boolean
+  // Set while the owner can invite: a pending invite can be sent again.
+  onResend?: () => void
+  resendState: "idle" | "sending" | "sent"
 }) {
   const { t } = useI18n()
   const accepted = !!seat.accepted_at
+  const expired = !accepted && !!seat.invite_expires_at && new Date(seat.invite_expires_at).getTime() < Date.now()
   return (
     <div className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium truncate">{seat.email}</span>
-          <Badge variant="secondary" className="text-xs capitalize">
-            {seat.role === "admin" ? t("portal.roleAdmin") : t("portal.roleMember")}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="font-medium truncate max-w-full" title={seat.email}>
+            {seat.email}
+          </span>
+          <Badge variant="secondary" className="text-xs">
+            {t("portal.roleMember")}
           </Badge>
           {!accepted && (
-            <Badge variant="outline" className="text-xs">
-              {t("portal.seatPending")}
+            <Badge variant="outline" className={cn("text-xs", expired && "text-destructive")}>
+              {t(expired ? "portal.inviteExpired" : "portal.seatPending")}
+            </Badge>
+          )}
+          {seat.paused && (
+            <Badge variant="outline" className="text-xs text-amber-700" title={t("portal.seatPausedHint")}>
+              {t("portal.seatPaused")}
             </Badge>
           )}
         </div>
@@ -653,6 +896,24 @@ function SeatRow({
             : `${t("portal.seatInvitedOn")} ${formatDate(seat.invited_at)}`}
         </p>
       </div>
+      {!accepted && onResend && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 shrink-0 px-2 text-xs"
+          disabled={resendState !== "idle"}
+          onClick={onResend}
+        >
+          {resendState === "sent" ? (
+            <>
+              <Check className="h-3 w-3 text-emerald-600" />
+              {t("portal.inviteSentShort")}
+            </>
+          ) : (
+            t("portal.resendInvite")
+          )}
+        </Button>
+      )}
       {canManage && (
         <Button
           variant="ghost"
@@ -660,7 +921,7 @@ function SeatRow({
           className="h-7 w-7 shrink-0 text-destructive"
           disabled={isRemoving}
           onClick={onRemove}
-          aria-label={t("portal.removeMember")}
+          aria-label={t(accepted ? "portal.removeMember" : "portal.cancelInvite")}
         >
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
@@ -673,17 +934,48 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
   const { t } = useI18n()
   const qc = useQueryClient()
   const [email, setEmail] = useState("")
-  const [role, setRole] = useState<"member" | "admin">("member")
 
   const inviteMut = useMutation({
-    mutationFn: () => portal.addSeat({ license_key: license.license_key, email: email.trim(), role }),
-    onSuccess: () => {
-      showToast(t("licenses.seatInviteSent"))
+    mutationFn: () => portal.addSeat({ license_key: license.license_key, email: email.trim() }),
+    // An address already a member comes back as it is, with no email;
+    // one already invited gets its invitation sent again, with a new
+    // link, as Resend does.
+    onSuccess: (seat) => {
+      const listed = qc.getQueryData<{ seats: Seat[] }>(["portal", "seats", license.id])?.seats
+      const wasPending = listed?.some((s) => s.id === seat.id && !s.accepted_at && !s.removed_at)
+      if (wasPending && !seat.accepted_at) markSent(seat.id)
+      showToast(
+        seat.accepted_at
+          ? t("portal.inviteAlreadyJoined").replace("{email}", seat.email)
+          : wasPending
+            ? t("portal.inviteResent").replace("{email}", seat.email)
+            : t("licenses.seatInviteSent"),
+        "success",
+      )
       qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
       qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
       onClose()
     },
-    onError: (e: Error) => showToast(e.message, "error"),
+    meta: { ownErrors: true },
+    onError: (e: Error) => {
+      // Full, or no longer taking members (its state or key changed
+      // since the page loaded): the card behind is read again, so it
+      // shows the license as it is.
+      if (errorCode(e) === "SEAT_LIMIT" || errorCode(e) === "LICENSE_NOT_FOUND")
+        qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      // Nothing to retry: the dialog goes, and the card shows why.
+      if (errorCode(e) === "LICENSE_NOT_FOUND") onClose()
+      showToast(
+        errorCode(e) === "UPGRADE_IN_PROGRESS"
+          ? t("portal.inviteDuringUpgrade")
+          : errorCode(e) === "SEAT_LIMIT"
+            ? t("portal.inviteSeatLimit")
+            : errorCode(e) === "LICENSE_NOT_FOUND"
+              ? t("portal.changedElsewhere")
+              : e.message,
+        "error",
+      )
+    },
   })
 
   const trimmed = email.trim()
@@ -708,24 +1000,11 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="teammate@example.com"
+                placeholder="member@example.com"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && canSubmit) inviteMut.mutate()
                 }}
               />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="invite-role">{t("team.role")}</Label>
-              <Select value={role} onValueChange={(v) => setRole(v as "member" | "admin")}>
-                <SelectTrigger id="invite-role">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="member">{t("portal.roleMember")}</SelectItem>
-                  <SelectItem value="admin">{t("portal.roleAdmin")}</SelectItem>
-                </SelectContent>
-              </Select>
             </div>
 
             <div className="flex justify-end gap-2">
@@ -744,7 +1023,13 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
 }
 
 function QuotaUsageSection({ license }: { license: PortalLicense }) {
+  const { t } = useI18n()
   const quotaEntitlements = (license.plan?.entitlements || []).filter((e) => e.value_type === "quota")
+
+  // A paused member's key reads no usage until a seat is free.
+  if (license.key_paused) {
+    return <p className="text-sm text-muted-foreground py-4 text-center">{t("portal.usagePaused")}</p>
+  }
 
   if (quotaEntitlements.length === 0) {
     return <p className="text-sm text-muted-foreground py-4 text-center">No quota-based features.</p>
@@ -811,16 +1096,19 @@ function CancelDialog({
   licenseId,
   provider,
   productName,
+  scheduled,
   onClose,
 }: {
   licenseId: string
+  // Already set to end at the period end: what is left is to end it now.
+  scheduled: boolean
   provider: string
   productName: string
   onClose: () => void
 }) {
   const { t } = useI18n()
   const qc = useQueryClient()
-  const [immediate, setImmediate] = useState(false)
+  const [immediate, setImmediate] = useState(scheduled)
 
   const cancelMut = useMutation({
     mutationFn: () => {
@@ -828,6 +1116,7 @@ function CancelDialog({
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
+      showToast(t(immediate ? "portal.cancelledNow" : "portal.cancelledAtPeriodEnd"), "success")
       onClose()
     },
     onError: (e: Error) => showToast(e.message, "error"),
@@ -837,12 +1126,16 @@ function CancelDialog({
     <Dialog open onOpenChange={onClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("portal.cancelSubscription")}</DialogTitle>
-          <DialogDescription>{t("portal.cancelDesc", { product: productName })}</DialogDescription>
+          <DialogTitle>{t(scheduled ? "portal.endNowTitle" : "portal.cancelSubscription")}</DialogTitle>
+          <DialogDescription>
+            {scheduled
+              ? t("portal.endNowDesc", { product: productName })
+              : t("portal.cancelDesc", { product: productName })}
+          </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <div className="space-y-4">
-            {provider === "stripe" && (
+            {provider === "stripe" && !scheduled && (
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -861,7 +1154,7 @@ function CancelDialog({
                 {t("common.cancel")}
               </Button>
               <Button variant="destructive" onClick={() => cancelMut.mutate()} disabled={cancelMut.isPending}>
-                {cancelMut.isPending ? t("common.loading") : t("portal.confirmCancel")}
+                {cancelMut.isPending ? t("common.loading") : t(scheduled ? "portal.endNow" : "portal.confirmCancel")}
               </Button>
             </div>
           </div>
@@ -930,6 +1223,23 @@ function InvoicesDialog({ licenseId, onClose }: { licenseId: string; onClose: ()
   )
 }
 
+// planKind is a plan's type and billing period in the reader's language.
+function planKind(t: ReturnType<typeof useI18n>["t"], plan: Plan): string {
+  const types: Record<string, TranslationKeys> = {
+    subscription: "plans.subscription",
+    perpetual: "plans.perpetual",
+    trial: "plans.trial",
+  }
+  const intervals: Record<string, TranslationKeys> = { month: "plans.monthly", year: "plans.yearly" }
+  const type = types[plan.license_type] ? t(types[plan.license_type]) : plan.license_type
+  const interval = plan.billing_interval
+    ? intervals[plan.billing_interval]
+      ? t(intervals[plan.billing_interval])
+      : plan.billing_interval
+    : ""
+  return interval ? `${type} · ${interval}` : type
+}
+
 // UpgradeDialog lists the product's paid plans for a licence nothing is
 // billing yet. Picking one goes to Stripe checkout; once paid, the same
 // licence moves to that plan.
@@ -955,7 +1265,15 @@ function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: 
       const res = await portal.upgrade({ license_id: license.id, plan_id: plan.id })
       window.location.href = res.url
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "An error occurred", "error")
+      const d = errorDetails(err)
+      showToast(
+        errorCode(err) === "SEATS_IN_USE"
+          ? t("portal.upgradeTooManyPeople", { people: Number(d?.in_use ?? 0), max: Number(d?.seat_limit ?? 0) })
+          : err instanceof Error
+            ? err.message
+            : "An error occurred",
+        "error",
+      )
       setStarting("")
     }
   }
@@ -979,8 +1297,8 @@ function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: 
                   <div>
                     <p className="font-medium text-sm">{plan.name}</p>
                     <p className="text-xs text-muted-foreground">
-                      {plan.license_type}
-                      {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
+                      {planKind(t, plan)}
+                      {plan.per_seat ? ` · ${t("portal.perSeatChooseAtCheckout")}` : ""}
                     </p>
                   </div>
                   <Button size="sm" onClick={() => start(plan)} disabled={starting !== ""}>
@@ -998,7 +1316,6 @@ function UpgradeDialog({ license, onClose }: { license: PortalLicense; onClose: 
 
 function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClose: () => void }) {
   const { t } = useI18n()
-  const qc = useQueryClient()
 
   // Fetch available plans via portal API (not admin)
   const { data: plansData } = useQuery({
@@ -1007,26 +1324,29 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
   })
   // Only other subscription plans with a Stripe price: a subscription
   // can move between prices, not become a one-time purchase. Mirrors
-  // the backend's change-plan gate.
+  // the backend's change-plan gate. With a change waiting for payment,
+  // the current plan is offered too: choosing it drops that change.
+  const waiting =
+    !!license.stripe_pending_update_expires_at && new Date(license.stripe_pending_update_expires_at) > new Date()
   const plans = (plansData?.plans || []).filter(
-    (p: Plan) => p.id !== license.plan_id && p.license_type === "subscription" && p.stripe_price_id,
+    (p: Plan) => (p.id !== license.plan_id || waiting) && p.license_type === "subscription" && p.stripe_price_id,
   )
 
-  // Switching bills the customer at once (prorated), so it is
-  // confirmed first and acknowledged after.
-  const [confirming, setConfirming] = useState<Plan | null>(null)
-  const changeMut = useMutation({
-    mutationFn: (plan: Plan) => portal.changePlan({ license_id: license.id, new_price_id: plan.stripe_price_id || "" }),
-    onSuccess: (_, plan) => {
-      qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
-      showToast(t("portal.planChanged", { plan: plan.name }), "success")
-      onClose()
-    },
-    onError: (e: Error) => {
-      setConfirming(null)
-      showToast(e.message, "error")
-    },
-  })
+  // Picking a plan opens the change itself: seats for a plan sold per
+  // seat, then Stripe's price for the switch, confirmed before anything
+  // changes.
+  const [chosen, setChosen] = useState<Plan | null>(null)
+  if (chosen) {
+    return (
+      <SubscriptionChangeDialog
+        license={license}
+        target={chosen}
+        keep={chosen.id === license.plan_id}
+        onClose={onClose}
+        onBack={() => setChosen(null)}
+      />
+    )
+  }
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -1043,37 +1363,25 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
               {plans.map((plan: Plan) => (
                 <div key={plan.id} className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
                   <div>
-                    <p className="font-medium text-sm">{plan.name}</p>
+                    <p className="font-medium text-sm">
+                      {plan.name}
+                      {plan.id === license.plan_id && (
+                        <span className="text-muted-foreground font-normal"> · {t("portal.currentPlan")}</span>
+                      )}
+                    </p>
                     <p className="text-xs text-muted-foreground">
-                      {plan.license_type}
-                      {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
+                      {planKind(t, plan)}
+                      {plan.per_seat ? ` · ${t("portal.perSeat")}` : ""}
                     </p>
                   </div>
-                  <Button size="sm" onClick={() => setConfirming(plan)} disabled={changeMut.isPending}>
-                    {t("portal.switchTo")}
+                  <Button size="sm" onClick={() => setChosen(plan)}>
+                    {plan.id === license.plan_id ? t("portal.keepPlan") : t("portal.switchTo")}
                   </Button>
                 </div>
               ))}
             </div>
           )}
         </DialogBody>
-        <AlertDialog
-          open={confirming !== null}
-          onOpenChange={(open) => !open && !changeMut.isPending && setConfirming(null)}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>{t("portal.confirmSwitchTitle", { plan: confirming?.name ?? "" })}</AlertDialogTitle>
-              <AlertDialogDescription>{t("portal.confirmSwitchDesc")}</AlertDialogDescription>
-            </AlertDialogHeader>
-            <div className="flex justify-end gap-2">
-              <AlertDialogCancel disabled={changeMut.isPending}>{t("common.cancel")}</AlertDialogCancel>
-              <Button onClick={() => confirming && changeMut.mutate(confirming)} disabled={changeMut.isPending}>
-                {changeMut.isPending ? t("common.loading") : t("portal.confirmSwitch")}
-              </Button>
-            </div>
-          </AlertDialogContent>
-        </AlertDialog>
       </DialogContent>
     </Dialog>
   )

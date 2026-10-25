@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -159,6 +160,142 @@ func TestRunMigrationsOutlastTheReadTimeout(t *testing.T) {
 	}
 	if d := time.Since(start); d < 4*time.Second {
 		t.Fatalf("RunMigrations returned after %v: it did not wait for the lock and the migration", d)
+	}
+	assertMigrationLockReleased(t, s)
+}
+
+// shortMigrationLockWaits makes a migration give up on a table lock, and
+// try again, within the time a test can wait.
+func shortMigrationLockWaits(t *testing.T, attempts int) {
+	t.Helper()
+	wait, backoff, tries := migrationTableLockWait, migrationLockBackoff, migrationLockAttempts
+	migrationTableLockWait = 300 * time.Millisecond
+	migrationLockBackoff = func(int) time.Duration { return 100 * time.Millisecond }
+	migrationLockAttempts = attempts
+	t.Cleanup(func() { migrationTableLockWait, migrationLockBackoff, migrationLockAttempts = wait, backoff, tries })
+}
+
+// holdTableLock keeps a transaction that has read the table open on a
+// connection of its own, as a long export or a session idle in a
+// transaction does, until release is called.
+func holdTableLock(t *testing.T, s *Store, table string) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT count(*) FROM "+table); err != nil {
+		t.Fatal(err)
+	}
+	return func() { _ = tx.Rollback() }
+}
+
+// A migration that cannot lock a table because a long transaction holds
+// it does not wait in the queue, where every later query on the table
+// would wait behind it: it gives up after a short wait, and is tried
+// again until the transaction ends.
+func TestMigrationBacksOffFromATableLock(t *testing.T) {
+	s := scratchMigrationStore(t, nil)
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, "CREATE TABLE busy (id int)"); err != nil {
+		t.Fatal(err)
+	}
+	shortMigrationLockWaits(t, 50)
+	release := holdTableLock(t, s, "busy")
+	time.AfterFunc(2*time.Second, release)
+
+	// Traffic on the table meanwhile: no query waits behind the migration
+	// for much longer than its short lock wait.
+	stop := make(chan struct{})
+	slowest := make(chan time.Duration, 1)
+	go func() {
+		var worst time.Duration
+		for {
+			select {
+			case <-stop:
+				slowest <- worst
+				return
+			default:
+			}
+			start := time.Now()
+			_, _ = s.DB.ExecContext(ctx, "SELECT count(*) FROM busy")
+			worst = max(worst, time.Since(start))
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	err := s.RunMigrations(writeMigrations(t, "ALTER TABLE busy ADD COLUMN extra int"))
+	close(stop)
+	worst := <-slowest
+	if err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	if d := time.Since(start); d < 2*time.Second {
+		t.Fatalf("migration done after %v, before the lock was released", d)
+	}
+	if worst > time.Second {
+		t.Fatalf("a query on the table waited %v behind the migration", worst)
+	}
+	var has bool
+	if err := s.DB.NewRaw("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'busy' AND column_name = 'extra')").Scan(ctx, &has); err != nil || !has {
+		t.Fatalf("column added = %v (%v)", has, err)
+	}
+	assertMigrationLockReleased(t, s)
+}
+
+// A lock held through every attempt fails the run, leaving nothing of
+// the migration behind and saying why.
+func TestMigrationGivesUpOnAHeldTableLock(t *testing.T) {
+	s := scratchMigrationStore(t, nil)
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, "CREATE TABLE busy (id int)"); err != nil {
+		t.Fatal(err)
+	}
+	shortMigrationLockWaits(t, 3)
+	release := holdTableLock(t, s, "busy")
+	defer release()
+
+	err := s.RunMigrations(writeMigrations(t, "ALTER TABLE busy ADD COLUMN extra int"))
+	if err == nil || !isLockTimeout(err) {
+		t.Fatalf("migrations under a held lock = %v, want a lock timeout", err)
+	}
+	// The error names the open transaction, for whoever has to end it.
+	if !strings.Contains(err.Error(), "SELECT count(*) FROM busy") {
+		t.Fatalf("the error does not name the transaction holding the table: %v", err)
+	}
+	var recorded int
+	if err := s.DB.NewRaw("SELECT count(*) FROM schema_migrations").Scan(ctx, &recorded); err != nil || recorded != 0 {
+		t.Fatalf("%d migrations recorded (%v), want none", recorded, err)
+	}
+	assertMigrationLockReleased(t, s)
+}
+
+// A migration the server picks as the victim of a deadlock is tried
+// again, as one that waited too long for a lock is: its transaction was
+// rolled back whole.
+func TestMigrationRetriesADeadlock(t *testing.T) {
+	s := scratchMigrationStore(t, nil)
+	ctx := context.Background()
+	// A sequence is not rolled back with the transaction, so it counts
+	// the attempts: the first fails as a deadlock would.
+	if _, err := s.DB.ExecContext(ctx, "CREATE SEQUENCE attempts"); err != nil {
+		t.Fatal(err)
+	}
+	shortMigrationLockWaits(t, 5)
+	err := s.RunMigrations(writeMigrations(t, `DO $$ BEGIN
+		IF nextval('attempts') = 1 THEN
+			RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01';
+		END IF;
+	END $$;
+	CREATE TABLE after_deadlock (id int);`))
+	if err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	var tries int
+	if err := s.DB.NewRaw("SELECT last_value FROM attempts").Scan(ctx, &tries); err != nil || tries != 2 {
+		t.Fatalf("attempts = %d (%v), want 2", tries, err)
 	}
 	assertMigrationLockReleased(t, s)
 }

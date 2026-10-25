@@ -53,7 +53,7 @@ func TestSeatLimitCountsTheOwner(t *testing.T) {
 		return l
 	}
 	invite := func(l *model.License, who string) error {
-		_, err := svc.AddSeat(ctx, AddSeatInput{LicenseKey: l.LicenseKey, Email: who + "-" + suffix + "@example.com", Role: "member"})
+		_, err := svc.AddSeat(ctx, AddSeatInput{LicenseKey: l.LicenseKey, Email: who + "-" + suffix + "@example.com", Role: "member", ActorEmail: l.Email})
 		return err
 	}
 	seatLimit := func(err error, current, max int) bool {
@@ -89,7 +89,7 @@ func TestSeatLimitCountsTheOwner(t *testing.T) {
 		}
 		return seat.ID
 	}
-	if err := svc.RemoveSeat(ctx, three.LicenseKey, seatID(three, "b"), "", ""); err != nil {
+	if err := svc.RemoveSeat(ctx, three.LicenseKey, seatID(three, "b"), "", "", three.Email); err != nil {
 		t.Fatalf("remove b: %v", err)
 	}
 	if err := invite(three, "c"); err != nil {
@@ -98,7 +98,7 @@ func TestSeatLimitCountsTheOwner(t *testing.T) {
 	if err := invite(three, "b"); !seatLimit(err, 3, 3) {
 		t.Fatalf("bring b back on a full license = %v, want SEAT_LIMIT with current 3, max 3", err)
 	}
-	if err := svc.RemoveSeat(ctx, three.LicenseKey, seatID(three, "c"), "", ""); err != nil {
+	if err := svc.RemoveSeat(ctx, three.LicenseKey, seatID(three, "c"), "", "", three.Email); err != nil {
 		t.Fatalf("remove c: %v", err)
 	}
 	if err := invite(three, "b"); err != nil {
@@ -124,6 +124,7 @@ func TestSeatLimitCountsTheOwner(t *testing.T) {
 		Where("id = ?", three.ID).Exec(ctx); err != nil {
 		t.Fatal(err)
 	}
+	three.Email = "A-" + suffix + "@example.com" // the owner who invites now
 	if n, _ := s.CountActiveSeats(ctx, three.ID); n != 1 {
 		t.Fatalf("members after the owner took a member's address = %d, want 1", n)
 	}

@@ -118,9 +118,9 @@ func (h *PublicPlansHandler) ListPlans(c *gin.Context) {
 	priceCtx, cancelPrices := context.WithTimeout(c, h.stripeBudget)
 	defer cancelPrices()
 
-	// Same field selection as /portal/plans: no Stripe secrets, no
-	// internal limits like max_activations, just what a pricing page
-	// renders plus the checkout_id that starts a purchase.
+	// No Stripe secrets and no internal limits like max_activations:
+	// just what a pricing page renders, whether the plan is sold per
+	// seat, and the checkout_id that starts a purchase.
 	active := []gin.H{}
 	for _, p := range plans {
 		if !p.Active {
@@ -136,6 +136,13 @@ func (h *PublicPlansHandler) ListPlans(c *gin.Context) {
 			// form rather than a checkout, so a pricing page can label
 			// the button.
 			"self_signup": p.SelfSignup && p.StripePriceID == "",
+			// A plan sold per seat: price is per seat, and the buyer
+			// picks between min_quantity and max_quantity at checkout
+			// (/pay/<checkout_id>?quantity=N presets it).
+			"per_seat": p.PerSeat,
+		}
+		if p.PerSeat {
+			out["min_quantity"], out["max_quantity"] = p.MinQuantity, p.MaxQuantity
 		}
 		if p.StripePriceID != "" {
 			if price, ok := h.price(priceCtx, p.StripePriceID); ok {

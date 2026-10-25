@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -122,15 +121,8 @@ func TestRefundAndPlanChangeSendWebhooks(t *testing.T) {
 	if err := s.CreateLicense(ctx, sub); err != nil {
 		t.Fatalf("create subscription license: %v", err)
 	}
-	subJSON := fmt.Sprintf(`{"id":%q,"object":"subscription","status":"active","items":{"object":"list","data":[{"id":"si_whe","object":"subscription_item"}]}}`, subID)
-	stubStripe(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/subscriptions/"+subID {
-			t.Errorf("unexpected Stripe call %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected", http.StatusNotFound)
-			return
-		}
-		_, _ = io.WriteString(w, subJSON)
-	})
+	fake := newFakeSubscription(subID, basic.StripePriceID, 1, map[string]int64{basic.StripePriceID: 1000, pro.StripePriceID: 2000})
+	stubStripe(t, fake.serve(t))
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

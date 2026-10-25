@@ -19,9 +19,7 @@ func TestSubscriptionEventEndsThisPeriod(t *testing.T) {
 		{"period end only on items", func() subscriptionEvent {
 			var e subscriptionEvent
 			e.CancelAt = periodEnd + 30*86400
-			e.Items.Data = append(e.Items.Data, struct {
-				CurrentPeriodEnd int64 `json:"current_period_end"`
-			}{periodEnd})
+			e.Items.Data = append(e.Items.Data, subscriptionItemEvent{CurrentPeriodEnd: periodEnd})
 			return e
 		}(), false},
 		{"cancel_at, period end unknown", subscriptionEvent{CancelAt: periodEnd}, true},

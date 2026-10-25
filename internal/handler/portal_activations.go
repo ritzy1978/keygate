@@ -15,11 +15,11 @@ import (
 )
 
 // PortalActivationsHandler exposes self-service activation management
-// to the license owner (the user matching license.email) OR any
-// accepted seat on the license (admin or member). The "member can
-// also manage activation slots" rule matches the use case: a
-// teammate who lost their laptop must be able to free their own
-// slot without filing a support ticket.
+// to the license owner (the user matching license.email), who manages
+// every device, and to any accepted member, who manages the devices
+// their own key activated. The "member can also manage activation
+// slots" rule matches the use case: a teammate who lost their laptop
+// must be able to free their own slot without filing a support ticket.
 //
 //	GET    /api/v1/portal/licenses/:license_key/activations
 //	DELETE /api/v1/portal/licenses/:license_key/activations/:activation_id
@@ -36,9 +36,10 @@ func NewPortalActivationsHandler(s *store.Store, webhook *service.WebhookService
 	return &PortalActivationsHandler{store: s, webhook: webhook}
 }
 
-// portalActivationView is the slimmed-down activation row exposed to
-// the owner. Hides internal fields (license_id) but keeps anything
-// useful for "which device am I deleting" decisions.
+// portalActivationView is the slimmed-down activation row the portal
+// shows: every device to the owner, a member's own to them. Hides
+// internal fields (license_id) but keeps anything useful for "which
+// device am I deleting" decisions.
 type portalActivationView struct {
 	ID             string    `json:"id"`
 	Identifier     string    `json:"identifier"`
@@ -49,57 +50,118 @@ type portalActivationView struct {
 	// No omitempty: it does nothing on a struct, and this column has a
 	// default of now(), so the field is always present anyway.
 	LastVerified time.Time `json:"last_verified"`
+	// SeatID and MemberEmail name the member whose key activated the
+	// device; both are absent for the owner's key.
+	SeatID      string `json:"seat_id,omitempty"`
+	MemberEmail string `json:"member_email,omitempty"`
+}
+
+// PortalViewerSeat is the seat the signed-in address holds on the
+// licence: nil for its owner, who holds no seat row, and for anyone
+// without an accepted seat. lic.Seats must be loaded.
+func PortalViewerSeat(lic *model.License, email string) *model.Seat {
+	if strings.EqualFold(lic.Email, email) {
+		return nil
+	}
+	// The oldest, should seats made before addresses were lower-cased
+	// leave two for one person: the seat Store.FindSeatByEmail picks.
+	var found *model.Seat
+	for _, s := range lic.Seats {
+		if s.RemovedAt != nil || s.AcceptedAt == nil || !strings.EqualFold(s.Email, email) {
+			continue
+		}
+		if found == nil || s.CreatedAt.Before(found.CreatedAt) || (s.CreatedAt.Equal(found.CreatedAt) && s.ID < found.ID) {
+			found = s
+		}
+	}
+	return found
+}
+
+// OwnDevices keeps the devices the member's own key activated.
+func OwnDevices(rows []*model.Activation, seatID string) []*model.Activation {
+	out := make([]*model.Activation, 0, len(rows))
+	for _, a := range rows {
+		if a.SeatID == seatID {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // resolveOwnedLicense loads the license at :license_key and verifies
-// the logged-in user owns it (matches license.email OR has a seat).
-// Returns nil-without-writing if not authorised; the response is
-// already written when err==true.
-func (h *PortalActivationsHandler) resolveOwnedLicense(c *gin.Context) (*model.License, bool) {
+// the logged-in user owns it (matches license.email) or holds an
+// accepted seat on it.
+// viewer is their seat, nil for the owner. The response is already
+// written when ok is false.
+func (h *PortalActivationsHandler) resolveOwnedLicense(c *gin.Context) (lic *model.License, viewer *model.Seat, ok bool) {
 	keyRaw := strings.TrimSpace(c.Param("license_key"))
 	if keyRaw == "" {
 		response.BadRequest(c, "license_key is required in the URL path")
-		return nil, false
+		return nil, nil, false
 	}
 
 	emailVal, _ := c.Get("email")
 	emailStr, _ := emailVal.(string)
 	if emailStr == "" {
 		response.Unauthorized(c, "unauthorized")
-		return nil, false
+		return nil, nil, false
 	}
 
 	lic, err := h.store.FindLicenseByKey(c.Request.Context(), keyRaw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		response.Internal(c, err)
+		return nil, nil, false
+	}
 	if err != nil {
 		// Don't differentiate "no such license" from "you don't own it"
 		// — both 404. Stops portal from being a license-key existence
 		// oracle for an authenticated but malicious user.
 		response.NotFound(c, "license not found")
-		return nil, false
+		return nil, nil, false
 	}
 
 	if strings.EqualFold(lic.Email, emailStr) {
-		return lic, true
+		return lic, nil, true
 	}
-	// ACCEPTED seat (admin or member) can also manage activations on
-	// their license. Pending invites confer no authority — possessing
+	// An ACCEPTED member can also manage their own activations on
+	// the license. Pending invites confer no authority — possessing
 	// an unclaimed invite token shouldn't let an OTP-logged-in user
 	// burn through activation slots before going through accept.
-	if seat, err := h.store.FindSeatByEmail(c.Request.Context(), lic.ID, emailStr); err == nil && seat.AcceptedAt != nil {
-		return lic, true
+	seat, err := h.store.FindSeatByEmail(c.Request.Context(), lic.ID, emailStr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		response.Internal(c, err)
+		return nil, nil, false
+	}
+	if err == nil && seat.AcceptedAt != nil {
+		return lic, seat, true
 	}
 	response.NotFound(c, "license not found")
-	return nil, false
+	return nil, nil, false
+}
+
+// visibleDevices is the licence's devices the viewer sees, and may
+// remove: every one for the owner (viewer nil), the devices their own
+// key activated for a member.
+func (h *PortalActivationsHandler) visibleDevices(c *gin.Context, lic *model.License, viewer *model.Seat) ([]*model.Activation, error) {
+	rows, err := h.store.ListActivations(c.Request.Context(), lic.ID)
+	if err != nil || viewer == nil {
+		return rows, err
+	}
+	return OwnDevices(rows, viewer.ID), nil
 }
 
 // GET /api/v1/portal/licenses/:license_key/activations
 func (h *PortalActivationsHandler) List(c *gin.Context) {
-	lic, ok := h.resolveOwnedLicense(c)
+	lic, viewer, ok := h.resolveOwnedLicense(c)
 	if !ok {
 		return
 	}
-	rows, err := h.store.ListActivations(c.Request.Context(), lic.ID)
+	rows, err := h.visibleDevices(c, lic, viewer)
 	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	if err := h.store.FillMemberEmails(c.Request.Context(), rows); err != nil {
 		response.Internal(c, err)
 		return
 	}
@@ -113,6 +175,8 @@ func (h *PortalActivationsHandler) List(c *gin.Context) {
 			IPAddress:      a.IPAddress,
 			CreatedAt:      a.CreatedAt,
 			LastVerified:   a.LastVerified,
+			SeatID:         a.SeatID,
+			MemberEmail:    a.MemberEmail,
 		})
 	}
 	response.OK(c, gin.H{"activations": response.Array(out), "max": maxActivationsForLicense(lic)})
@@ -120,7 +184,7 @@ func (h *PortalActivationsHandler) List(c *gin.Context) {
 
 // DELETE /api/v1/portal/licenses/:license_key/activations/:activation_id
 func (h *PortalActivationsHandler) Delete(c *gin.Context) {
-	lic, ok := h.resolveOwnedLicense(c)
+	lic, viewer, ok := h.resolveOwnedLicense(c)
 	if !ok {
 		return
 	}
@@ -130,10 +194,11 @@ func (h *PortalActivationsHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	// Verify the activation actually belongs to THIS license.
+	// Verify the activation actually belongs to THIS license, and is
+	// one the viewer sees: a member removes only their own devices.
 	// Without this check the URL pattern would let any portal user
 	// delete any activation if they knew its UUID.
-	rows, err := h.store.ListActivations(c.Request.Context(), lic.ID)
+	rows, err := h.visibleDevices(c, lic, viewer)
 	if err != nil {
 		response.Internal(c, err)
 		return
@@ -174,13 +239,15 @@ func (h *PortalActivationsHandler) Delete(c *gin.Context) {
 }
 
 // maxActivationsForLicense returns the activation cap for a license
-// (driven by the plan's max_activations). Used for UI hints like
-// "2 / 3 devices in use".
+// (the plan's max_activations, per seat on a plan sold that way). Used
+// for UI hints like "2 / 3 devices in use"; 0 when there is no plan to
+// say.
 func maxActivationsForLicense(lic *model.License) int {
-	if lic.Plan != nil && lic.Plan.MaxActivations > 0 {
-		return lic.Plan.MaxActivations
+	if lic.Plan == nil {
+		return 0
 	}
-	return 0
+	_, activations := lic.Limits()
+	return activations
 }
 
 func emailFromContext(c *gin.Context) string {

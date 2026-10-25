@@ -24,7 +24,14 @@ func CreateLicenseUpgradeIn(ctx context.Context, db bun.IDB, u *model.LicenseUpg
 	if u.State == "" {
 		u.State = model.UpgradePending
 	}
-	_, err := db.NewInsert().Model(u).Exec(ctx)
+	q := db.NewInsert().Model(u)
+	if u.CreatedAt.IsZero() {
+		// When it is written, not when its transaction began: invites
+		// are held up from here (see ErrUpgradeCheckoutOpen), and the
+		// checkout was opened just before.
+		q = q.Value("created_at", "clock_timestamp()")
+	}
+	_, err := q.Returning("created_at").Exec(ctx)
 	return err
 }
 
@@ -106,6 +113,7 @@ func MarkLicenseUpgradeAppliedIn(ctx context.Context, db bun.IDB, u *model.Licen
 		"state", "applied_at", "to_plan_id", "stripe_payment_intent_id", "stripe_subscription_id",
 		"from_plan_id", "from_status", "from_valid_until", "from_updates_until",
 		"from_updates_terms_set", "from_payment_provider", "from_stripe_customer_id", "from_canceled_at",
+		"from_quantity",
 	).WherePK().Exec(ctx)
 	return err
 }
@@ -141,6 +149,8 @@ type UpgradeRevert struct {
 	// plan since.
 	Plan       *model.Plan
 	PrevPlanID string
+	// PrevQuantity is the seats the licence had on the upgrade's plan.
+	PrevQuantity int
 }
 
 // RevertLicenseUpgradeIn puts the licence an applied upgrade changed
@@ -185,7 +195,7 @@ func RevertLicenseUpgradeIn(ctx context.Context, tx bun.IDB, u *model.LicenseUpg
 	cols := []string{
 		"plan_id", "valid_until", "canceled_at", "past_due_at", "updates_until", "updates_terms_set",
 		"payment_provider", "stripe_customer_id", "stripe_subscription_id", "stripe_payment_intent_id",
-		"stripe_checkout_session_id",
+		"stripe_checkout_session_id", "quantity", "stripe_pending_update_expires_at",
 	}
 	operatorHeld := lic.Status == model.StatusRevoked ||
 		(lic.Status == model.StatusSuspended && lic.SuspendedBy != model.SuspendedByStripe)
@@ -198,6 +208,10 @@ func RevertLicenseUpgradeIn(ctx context.Context, tx bun.IDB, u *model.LicenseUpg
 	l.UpdatesUntil, l.UpdatesTermsSet = u.FromUpdatesUntil, u.FromUpdatesTermsSet
 	l.PaymentProvider, l.StripeCustomerID = u.FromPaymentProvider, u.FromStripeCustomerID
 	l.StripeSubscriptionID, l.StripePaymentIntentID, l.StripeCheckoutSessionID = "", "", ""
+	// The seats the subscription paid for go with it, and any change
+	// it held for payment.
+	l.Quantity = max(u.FromQuantity, 1)
+	l.StripePendingUpdateExpiresAt = nil
 	if err := UpdateLicenseIn(ctx, tx, &l, cols...); err != nil {
 		return UpgradeRevert{}, err
 	}
@@ -210,7 +224,7 @@ func RevertLicenseUpgradeIn(ctx context.Context, tx bun.IDB, u *model.LicenseUpg
 	if err := EndLicenseUpgradeIn(ctx, tx, u, model.UpgradeReverted, reason); err != nil {
 		return UpgradeRevert{}, err
 	}
-	return UpgradeRevert{Reverted: true, License: &l, Plan: plan, PrevPlanID: lic.PlanID}, nil
+	return UpgradeRevert{Reverted: true, License: &l, Plan: plan, PrevPlanID: lic.PlanID, PrevQuantity: lic.Quantity}, nil
 }
 
 // ListUpgradeTargetPlans returns the active, priced plans of the given

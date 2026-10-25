@@ -117,8 +117,8 @@ silently**. Do not write one sorting helper and point it at every list.
   for another product's resources, and its lists and the license export
   narrow to its product. An `admin` key cannot be bound.
 - `/portal/*` is a customer session.
-  `/portal/licenses/:license_key/activations` carries the key in the
-  path; the server redacts that segment before logging and an SDK's own
+  `/portal/licenses/:license_key/activations` carries the key in the path;
+  the server redacts that segment before logging and an SDK's own
   logging should too.
 
 ## Idempotency

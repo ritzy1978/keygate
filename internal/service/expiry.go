@@ -60,6 +60,49 @@ func (c *ExpiryChecker) RunAll(ctx context.Context) {
 	c.SendPaymentFailureReminders(ctx)
 	c.CleanupExpiredActivations(ctx)
 	c.SyncSubscriptionStates(ctx)
+	c.FinishSeatRemovals(ctx)
+}
+
+// FinishSeatRemovals repairs what an older version leaves when it runs
+// beside this one in a rolling upgrade: a member it removed keeps their
+// key and devices (it set removed_at alone), so does one it removed and
+// invited back (pending again), and a seat it invited may carry the
+// admin role this version dropped. The key no longer opens
+// anything, but the devices hold slots; they are removed, and reported
+// as deactivated, as a removal does. Idempotent, and a no-op once no
+// older version runs.
+func (c *ExpiryChecker) FinishSeatRemovals(ctx context.Context) {
+	if n, err := c.store.NormalizeSeatRoles(ctx); err != nil {
+		c.logger.Error("seat role repair failed", "error", err)
+	} else if n > 0 {
+		c.logger.Info("seat roles repaired: admin seats are members", "count", n)
+	}
+	leftovers, err := c.store.FindSeatLeftovers(ctx, 500)
+	if err != nil {
+		c.logger.Error("seat leftover check failed", "error", err)
+		return
+	}
+	for _, seat := range leftovers {
+		devices, done, err := c.store.ClearSeatLeftovers(ctx, seat.ID)
+		if err != nil {
+			c.logger.Error("seat leftover repair failed", "seat_id", seat.ID, "error", err)
+			continue
+		}
+		if !done {
+			continue
+		}
+		for _, a := range devices {
+			c.webhook.Dispatch(ctx, seat.ProductID, "license.deactivated", map[string]any{
+				"license_id": seat.LicenseID, "identifier": a.Identifier,
+			})
+		}
+		c.store.Audit(ctx, &model.AuditLog{
+			Entity: "seat", EntityID: seat.ID, Action: "seat_removal_finished",
+			ActorType: "system",
+			Changes:   map[string]any{"license_id": seat.LicenseID, "email": seat.Email, "devices_removed": len(devices)},
+		})
+		c.logger.Info("seat removal finished", "seat_id", seat.ID, "license_id", seat.LicenseID, "devices_removed", len(devices))
+	}
 }
 
 // ExpireGracePeriodLicenses marks active/past_due licenses as expired

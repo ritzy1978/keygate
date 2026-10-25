@@ -110,11 +110,20 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 	if err := s.assertUsable(lic); err != nil {
 		return nil, err
 	}
+	if err := seatPaused(lic); err != nil {
+		return nil, err
+	}
 	if err := refuseFloating(lic); err != nil {
 		return nil, err
 	}
 
-	if existing, err := s.store.FindActivation(ctx, lic.ID, in.Identifier); err == nil {
+	// A device already activated with this key, or asked about with the
+	// licence's key, which manages every device, needs nothing more. A
+	// member's key on anyone else's device is decided under the lock
+	// below: refused, unless the device predates members' keys and so
+	// moves to them (see Store.ActivateForKey).
+	seatID := keySeatID(lic)
+	if existing, err := s.store.FindActivation(ctx, lic.ID, in.Identifier); err == nil && (seatID == "" || existing.SeatID == seatID) {
 		_ = s.store.TouchActivation(ctx, existing.ID)
 		middleware.LicenseActivations.WithLabelValues(lic.ProductID, "already_activated").Inc()
 		token, _, err := s.signToken(ctx, lic, in.Identifier)
@@ -132,15 +141,32 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 	act := &model.Activation{
 		LicenseID: lic.ID, Identifier: in.Identifier,
 		IdentifierType: in.IdentifierType, Label: in.Label,
-		IPAddress: in.IPAddress,
+		IPAddress: in.IPAddress, SeatID: seatID,
 	}
-	if err := s.store.ActivateWithinLimit(ctx, act, max); err != nil {
+	if err := s.store.ActivateForKey(ctx, act, max, in.LicenseKey); err != nil {
+		// The key was cleared after it was looked up: the member was
+		// removed, or the licence's key changed. Answered as a key
+		// that does not exist, which it now is.
+		if errors.Is(err, store.ErrKeyRevoked) {
+			return nil, licenseNotFound()
+		}
+		if errors.Is(err, store.ErrDeviceHeld) {
+			return nil, apperr.Conflict("DEVICE_HELD",
+				"this device is activated with another key on this license; the license owner can remove it in the portal")
+		}
 		// The machine already held a slot. The read above missed it
 		// because it ran outside the transaction, so this is the same
 		// answer that read would have given: a repeat activation is
 		// the licence working, not a failure.
 		if errors.Is(err, store.ErrAlreadyActivated) {
 			_ = s.store.TouchActivation(ctx, act.ID)
+			if errors.Is(err, store.ErrDeviceMoved) {
+				s.store.Audit(ctx, &model.AuditLog{
+					Entity: "license", EntityID: lic.ID, Action: "device_moved_to_member",
+					ActorType: "sdk", IPAddress: in.IPAddress,
+					Changes: map[string]any{"identifier": in.Identifier, "seat_id": seatID},
+				})
+			}
 			middleware.LicenseActivations.WithLabelValues(lic.ProductID, "already_activated").Inc()
 			token, _, terr := s.signToken(ctx, lic, in.Identifier)
 			if terr != nil {
@@ -290,7 +316,7 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	// non-existent-key path returns, so the endpoint can't be used to probe
 	// which license_key strings are real. Paid users learn lifecycle state
 	// via email + the (session-auth) portal, not via this routine call.
-	if err := s.assertUsable(lic); err != nil {
+	if err := firstErr(s.assertUsable(lic), seatPaused(lic)); err != nil {
 		locked := s.recordFailure(in.IPAddress)
 		middleware.LicenseVerifications.WithLabelValues(lic.ProductID, "unusable").Inc()
 		if locked != nil {
@@ -304,6 +330,14 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	}
 
 	act, err := s.store.FindActivation(ctx, lic.ID, in.Identifier)
+	// A member's key vouches only for that member's devices, as it
+	// activates and releases only those; the licence's own key for any.
+	// A device on the licence's key answers the same: one from before
+	// members had keys moves to the member on their activate, any other
+	// is refused there with DEVICE_HELD (see Store.ActivateForKey).
+	if err == nil && lic.KeySeat != nil && act.SeatID != lic.KeySeat.ID {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		middleware.LicenseVerifications.WithLabelValues(lic.ProductID, "not_activated").Inc()
 		// Not yet activated for this device → looks identical to "no
@@ -397,6 +431,11 @@ func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) err
 	}
 
 	act, err := s.store.FindActivation(ctx, lic.ID, in.Identifier)
+	// A member's key releases only that member's devices; the licence's
+	// own key releases any.
+	if err == nil && lic.KeySeat != nil && act.SeatID != lic.KeySeat.ID {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		// Same 404 LICENSE_NOT_FOUND as "license missing" so deactivate
 		// can't be used to probe for real keys ("oh, this key returned
@@ -431,6 +470,15 @@ func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) err
 
 // ─── Helpers ───
 
+// keySeatID is the member whose own key found the licence, or "" for
+// the licence's key (see Store.FindLicenseByKey).
+func keySeatID(lic *model.License) string {
+	if lic.KeySeat == nil {
+		return ""
+	}
+	return lic.KeySeat.ID
+}
+
 // licenseNotFound returns a generic 404 used for unauthenticated public
 // SDK responses. We deliberately do NOT distinguish between
 //
@@ -456,8 +504,9 @@ func licenseNotFound() error {
 //
 //   - capability == "": skip the capability check
 //   - usabilityRequired == false: skip the lifecycle check (use for
-//     read-only endpoints that should still respond to suspended
-//     licenses; today every caller passes true)
+//     endpoints that must still work on a suspended or lapsed license:
+//     listing seats, and removing one so a renewal does not restore
+//     access)
 //
 // Admin endpoints (session-authenticated) MUST NOT use this helper —
 // they need specific reasons (LICENSE_EXPIRED, INCOMPATIBLE_PRODUCT_TYPE,
@@ -478,10 +527,32 @@ func loadLicenseForSDK(ctx context.Context, st *store.Store, key, productID, cap
 			return nil, licenseNotFound()
 		}
 	}
-	if usabilityRequired && !IsLicenseUsable(lic) {
+	if usabilityRequired && (!IsLicenseUsable(lic) || lic.KeySeatPaused) {
 		return nil, licenseNotFound()
 	}
 	return lic, nil
+}
+
+// seatPaused refuses a member's key while the member is paused: the
+// licence holds more people than seats, and they joined beyond the limit
+// (see Store.SeatPaused). The owner frees a place, by removing a member
+// or adding seats, and the key works again.
+func seatPaused(lic *model.License) error {
+	if lic.KeySeat != nil && lic.KeySeatPaused {
+		return apperr.New(403, "SEAT_PAUSED",
+			"this member's seat is paused: the license has more people than seats; the owner can remove a member or add seats")
+	}
+	return nil
+}
+
+// firstErr is the first of errs that is not nil.
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // requireProductCapability is the central guard for product-type
@@ -543,11 +614,11 @@ func (s *LicenseService) assertUsable(lic *model.License) error {
 	}
 }
 
+// maxActivations is how many devices the licence holds: its plan's, or
+// for a plan sold per seat that many for each seat it is paid for.
 func (s *LicenseService) maxActivations(lic *model.License) int {
-	if lic.Plan != nil {
-		return lic.Plan.MaxActivations
-	}
-	return 3
+	_, activations := lic.Limits()
+	return activations
 }
 
 func (s *LicenseService) graceDays(lic *model.License) int {

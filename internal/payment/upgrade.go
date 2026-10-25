@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -57,6 +56,10 @@ const upgradeIneligibleProvider = "stripe_upgrade_ineligible"
 // errUpgradeIneligible means the licence or plan changed between the
 // checkout and its payment so that the upgrade no longer applies.
 var errUpgradeIneligible = errors.New("upgrade no longer applies")
+
+// errTeamTooLarge means more people are on the licence than the plan
+// sold per seat sells seats for.
+var errTeamTooLarge = errors.New("more people than the plan sells seats for")
 
 // errUpgradeClosed means the upgrade will never apply and nothing is
 // left to do for its session: refunded before it was applied, paid for
@@ -138,14 +141,6 @@ func (h *StripeHandler) UpgradableLicenses(ctx context.Context, email string, ls
 	return out, nil
 }
 
-// upgradeLockKey names the advisory lock StartUpgrade holds per licence,
-// so two clicks cannot both open a checkout.
-func upgradeLockKey(licenseID string) int64 {
-	hash := fnv.New64a()
-	hash.Write([]byte("upgrade:" + licenseID))
-	return int64(hash.Sum64())
-}
-
 // StartUpgrade starts a checkout that moves one of the caller's
 // licences to a paid plan. A checkout opened earlier for the licence is
 // expired first: two paid checkouts would leave the second subscription
@@ -210,7 +205,11 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 	}
 
 	var url string
-	err = h.Store.WithXactLock(c, upgradeLockKey(lic.ID), func(ctx context.Context, tx bun.Tx) error {
+	people := 0
+	err = h.Store.WithXactLock(c, store.UpgradeLockKey(lic.ID), func(ctx context.Context, tx bun.Tx) error {
+		// Stripe is asked under the lock, which invites wait on: bounded.
+		sctx, cancel := stripeContext(c)
+		defer cancel()
 		// The pending rows first: a fulfilment of one of them holds its
 		// row, so this waits for it to commit. Only then is the licence
 		// read again, so an upgrade applied meanwhile is seen and the
@@ -230,8 +229,24 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 		if !upgradeable(now, cur) {
 			return errUpgradeIneligible
 		}
+		// A plan sold per seat starts with a seat for everyone on the
+		// licence, and never fewer; a team larger than the plan sells
+		// cannot move to it. Counted under the lock, which an invite
+		// waits on (see store.UpgradeLockKey): nobody joins between the
+		// count and the checkout.
+		seats := 0
+		if plan.PerSeat {
+			members, err := store.CountActiveSeatsIn(ctx, tx, lic.ID)
+			if err != nil {
+				return err
+			}
+			if people = members + 1; people > plan.MaxQuantity {
+				return errTeamTooLarge
+			}
+			seats = max(people, plan.MinQuantity)
+		}
 		for _, p := range pending {
-			if err := expireCheckout(p.StripeCheckoutSessionID); err != nil {
+			if err := expireCheckout(sctx, p.StripeCheckoutSessionID); err != nil {
 				return err
 			}
 			if err := store.EndLicenseUpgradeIn(ctx, tx, p, model.UpgradeExpired, "replaced"); err != nil {
@@ -241,14 +256,29 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 
 		upgradeID := store.NewLicenseUpgradeID()
 		tags := map[string]string{metaKind: kindUpgrade, metaUpgradeID: upgradeID, metaLicenseID: lic.ID}
+		item, err := checkoutLineItem(plan, plan.StripePriceID, mode == stripe.CheckoutSessionModeSubscription, seats)
+		if err != nil {
+			return err
+		}
+		// Fewer seats than people would leave the team over its limit
+		// from the first day; the checkout does not go below them.
+		if item.AdjustableQuantity != nil && int64(seats) > *item.AdjustableQuantity.Minimum {
+			item.AdjustableQuantity.Minimum = stripe.Int64(int64(seats))
+			if seats >= plan.MaxQuantity {
+				item.AdjustableQuantity = nil
+			}
+		}
 		params := &stripe.CheckoutSessionParams{
-			Mode: stripe.String(string(mode)),
-			LineItems: []*stripe.CheckoutSessionLineItemParams{
-				{Price: stripe.String(plan.StripePriceID), Quantity: stripe.Int64(1)},
-			},
+			Mode:                stripe.String(string(mode)),
+			LineItems:           []*stripe.CheckoutSessionLineItemParams{item},
 			SuccessURL:          stripe.String(h.BaseURL + "/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
 			CancelURL:           stripe.String(h.BaseURL + "/portal"),
 			AllowPromotionCodes: stripe.Bool(true),
+		}
+		if plan.PerSeat {
+			// Nobody new is invited while it is open (see
+			// store.ErrUpgradeCheckoutOpen): an abandoned one lapses soon.
+			params.ExpiresAt = stripe.Int64(time.Now().Add(store.PerSeatUpgradeCheckoutTTL).Unix())
 		}
 		if now.StripeCustomerID != "" {
 			params.Customer = stripe.String(now.StripeCustomerID)
@@ -270,6 +300,7 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 		} else {
 			params.SubscriptionData = &stripe.CheckoutSessionSubscriptionDataParams{Metadata: tags}
 		}
+		params.Context = sctx
 		sess, err := session.New(params)
 		if err != nil {
 			return fmt.Errorf("create checkout session: %w", err)
@@ -280,7 +311,9 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 			// Not recorded: close the checkout rather than leave one open
 			// that nothing would replace. Fulfilment copes with a session
 			// that has no row, should it be paid regardless.
-			_ = expireCheckout(sess.ID)
+			closeCtx, closeCancel := stripeContext(c)
+			_ = expireCheckout(closeCtx, sess.ID)
+			closeCancel()
 			return fmt.Errorf("record upgrade: %w", err)
 		}
 		url = sess.URL
@@ -288,6 +321,12 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 	})
 	if errors.Is(err, errUpgradeIneligible) {
 		response.Err(c, http.StatusBadRequest, "UPGRADE_NOT_AVAILABLE", "this license cannot be upgraded to that plan")
+		return
+	}
+	if errors.Is(err, errTeamTooLarge) {
+		response.Conflict(c, "SEATS_IN_USE",
+			fmt.Sprintf("%d people are on this license; %s is sold for up to %d", people, plan.Name, plan.MaxQuantity),
+			gin.H{"in_use": people, "seat_limit": plan.MaxQuantity})
 		return
 	}
 	if errors.Is(err, errUpgradeInProgress) {
@@ -306,14 +345,14 @@ func (h *StripeHandler) StartUpgrade(c *gin.Context) {
 // expireCheckout closes a checkout session so it can no longer be paid.
 // One that is already expired is fine; one that has been completed
 // answers errUpgradeInProgress, since its payment is on its way.
-func expireCheckout(sessionID string) error {
+func expireCheckout(ctx context.Context, sessionID string) error {
 	if stripe.Key == "" {
 		return nil
 	}
-	if _, err := session.Expire(sessionID, nil); err == nil {
+	if _, err := session.Expire(sessionID, &stripe.CheckoutSessionExpireParams{Params: stripe.Params{Context: ctx}}); err == nil {
 		return nil
 	}
-	sess, err := session.Get(sessionID, nil)
+	sess, err := session.Get(sessionID, &stripe.CheckoutSessionParams{Params: stripe.Params{Context: ctx}})
 	if stripeNotFound(err) {
 		return nil
 	}
@@ -416,6 +455,7 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 	}
 
 	var oldPlanID string
+	var oldQuantity int
 	var lic *model.License
 	var newPlan *model.Plan
 	var upgrade *model.LicenseUpgrade
@@ -491,11 +531,12 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 		u.FromValidUntil, u.FromUpdatesUntil = locked.ValidUntil, locked.UpdatesUntil
 		u.FromUpdatesTermsSet, u.FromPaymentProvider = locked.UpdatesTermsSet, locked.PaymentProvider
 		u.FromStripeCustomerID, u.FromCanceledAt = locked.StripeCustomerID, locked.CanceledAt
+		u.FromQuantity = locked.Quantity
 		if err := store.MarkLicenseUpgradeAppliedIn(ctx, tx, u); err != nil {
 			return err
 		}
 
-		oldPlanID = locked.PlanID
+		oldPlanID, oldQuantity = locked.PlanID, locked.Quantity
 		l := *locked
 		l.PlanID = plan.ID
 		l.Status = model.StatusActive
@@ -516,9 +557,12 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 		l.StripeSubscriptionID = subscriptionID
 		l.StripePaymentIntentID = paymentIntentID
 		l.StripeCheckoutSessionID = sessionID
+		// The seats are what the subscription bills (read below); a
+		// one-time purchase is one.
+		l.Quantity = 1
 		cols := []string{"plan_id", "status", "valid_until", "canceled_at", "past_due_at",
 			"updates_until", "updates_terms_set", "payment_provider", "stripe_customer_id",
-			"stripe_subscription_id", "stripe_payment_intent_id", "stripe_checkout_session_id"}
+			"stripe_subscription_id", "stripe_payment_intent_id", "stripe_checkout_session_id", "quantity"}
 		// The subscription as just read from Stripe gives the licence its
 		// period and status in the same write, rather than in a sync
 		// after the commit that nothing retries if it fails.
@@ -535,9 +579,18 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 				pastDue := time.Now()
 				l.PastDueAt = &pastDue
 			}
+			if len(cur.Items.Data) > 0 {
+				l.Quantity = clampQuantity(cur.Items.Data[0].Quantity)
+			}
 			l.StripeSyncedAt = &asOf
 			cols = append(cols, "stripe_synced_at")
 		}
+		// The seats bought were counted from the people on the licence
+		// when the checkout opened, and nobody joins while it is open (see
+		// store.ErrUpgradeCheckoutOpen). Should there be more people all the
+		// same (an operator added one), the upgrade still applies, as paid:
+		// a licence over its seats keeps everyone, takes nobody new, and
+		// the owner adds seats or frees them.
 		update := store.UpdateLicenseIn
 		if locked.UpdatesUntil != nil {
 			// The old period's renewals belong to a period this licence
@@ -636,6 +689,7 @@ func (h *StripeHandler) fulfillUpgrade(ctx context.Context, customerID, subscrip
 			"license_id": lic.ID, "old_plan_id": oldPlanID, "new_plan_id": newPlan.ID,
 		})
 	}
+	h.announceUpgradeQuantity(ctx, lic, oldPlanID, oldQuantity, "upgrade")
 	h.mailPlanChanged(ctx, lic, oldPlanID, newPlan.Name)
 	slog.Info("stripe upgrade: applied", "license_id", lic.ID, "old_plan", oldPlanID, "new_plan", newPlan.ID, "source", source)
 	return true, nil
@@ -717,6 +771,7 @@ func (h *StripeHandler) revertUpgrade(ctx context.Context, upgradeID, reason, so
 			"license_id": lic.ID, "old_plan_id": res.PrevPlanID, "new_plan_id": plan.ID, "reason": reason,
 		})
 	}
+	h.announceUpgradeQuantity(ctx, lic, res.PrevPlanID, res.PrevQuantity, "upgrade_reverted")
 	h.mailPlanChanged(ctx, lic, res.PrevPlanID, plan.Name)
 	slog.Info("stripe upgrade: reverted", "license_id", lic.ID, "upgrade_id", upgradeID, "reason", reason)
 	return res, nil
@@ -917,6 +972,12 @@ func (h *StripeHandler) refundUpgrade(ctx context.Context, chargeID, paymentInte
 			return false, looked, err
 		}
 		looked = chargeInvoice{looked: true, invoice: inv}
+		// A change made since the upgrade (more seats, say) is billed on
+		// its own invoice. Refunding that pays the change back; the
+		// upgrade, and the subscription, stand. The purchase path says so.
+		if changeOnly(inv) {
+			return false, looked, nil
+		}
 		if inv != nil && inv.Parent != nil && inv.Parent.SubscriptionDetails != nil {
 			details := inv.Parent.SubscriptionDetails
 			if details.Subscription != nil {
@@ -1048,5 +1109,17 @@ func (h *StripeHandler) closeFailedUpgrade(ctx context.Context, sessionID string
 			return nil
 		}
 		return store.EndLicenseUpgradeIn(ctx, tx, u, model.UpgradeVoid, "payment_failed")
+	})
+}
+
+// announceUpgradeQuantity sends license.quantity_changed when an upgrade,
+// or undoing one, moved the seats a licence is paid for.
+func (h *StripeHandler) announceUpgradeQuantity(ctx context.Context, lic *model.License, beforePlanID string, before int, reason string) {
+	if before == lic.Quantity || h.WebhookSvc == nil || !h.seatsMatter(ctx, beforePlanID, lic.PlanID) {
+		return
+	}
+	h.WebhookSvc.Dispatch(ctx, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+		"license_id": lic.ID, "email": lic.Email, "plan_id": lic.PlanID,
+		"old_quantity": before, "new_quantity": lic.Quantity, "reason": reason,
 	})
 }

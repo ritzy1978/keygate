@@ -108,7 +108,7 @@ func TestPaymentFailedReportsEachEpisodeOnce(t *testing.T) {
 		return lic
 	}
 	fail := func(lic *model.License) {
-		h.onPaymentFailed(ctx, []byte(fmt.Sprintf(`{"subscription":%q,"status":"open"}`, lic.StripeSubscriptionID)))
+		_ = h.onPaymentFailed(ctx, []byte(fmt.Sprintf(`{"subscription":%q,"status":"open"}`, lic.StripeSubscriptionID)))
 	}
 	// Audit lines are written in the background.
 	audits := func(lic *model.License, want int) int {

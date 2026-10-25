@@ -42,7 +42,11 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { useI18n } from "@/i18n"
-import { admin, type Entitlement, type Plan } from "@/lib/api"
+import { admin, type Entitlement, errorCode, type Plan } from "@/lib/api"
+
+// model.MaxPlanQuantity: the most seats a plan sold per seat can sell.
+const MAX_PLAN_QUANTITY = 10000
+
 import { boolColor, formatDate } from "@/lib/utils"
 
 export default function PlansPage() {
@@ -94,6 +98,7 @@ export default function PlansPage() {
       setCreating(false)
       showToast(t("toast.planCreated"), "success")
     },
+    meta: { ownErrors: true },
     onError: (e: Error) => showToast(e.message, "error"),
   })
   const updateMut = useMutation({
@@ -102,15 +107,20 @@ export default function PlansPage() {
       qc.invalidateQueries({ queryKey: ["admin", "plans"] })
       openEditor(null)
     },
-    onError: (e: Error) => showToast(e.message, "error"),
+    meta: { ownErrors: true },
+    onError: (e: Error) =>
+      showToast(errorCode(e) === "PER_SEAT_LOCKED" ? t("plans.perSeatLockedError") : e.message, "error"),
   })
   // A plan's limits apply to every license on it at once. Lowering
-  // max_seats leaves the licenses already above it with their members
-  // but no room to invite, so the admin sees how many first.
+  // max_seats pauses the members who joined last on the licenses
+  // already above it, so the admin sees how many first.
   const saveEdit = async (plan: Plan, update: Partial<Plan> & { id: string }) => {
     const next = update.max_seats ?? plan.max_seats
     const prev = plan.max_seats
-    if (next > 0 && (prev === 0 || next < prev)) {
+    // A plan sold per seat holds the seats each license bought, not
+    // max_seats, so there is nothing to check.
+    const perSeat = update.per_seat ?? plan.per_seat
+    if (!perSeat && next > 0 && (prev === 0 || next < prev)) {
       if (checkingSeats) return
       const seq = ++checkSeq.current
       setCheckingSeats(true)
@@ -229,7 +239,11 @@ export default function PlansPage() {
                         </DataTableCell>
                         <DataTableCell>
                           {supportsActivations ? (
-                            p.max_activations
+                            p.per_seat ? (
+                              t("plans.perSeatValue", { count: p.max_activations })
+                            ) : (
+                              p.max_activations
+                            )
                           ) : (
                             <span className="text-muted-foreground" title={t("plans.notApplicableForType")}>
                               —
@@ -237,7 +251,9 @@ export default function PlansPage() {
                           )}
                         </DataTableCell>
                         <DataTableCell>
-                          {supportsSeats ? (
+                          {p.per_seat && supportsSeats ? (
+                            t("plans.perSeatRange", { min: p.min_quantity ?? 1, max: p.max_quantity ?? 100 })
+                          ) : supportsSeats ? (
                             p.max_seats || 0
                           ) : (
                             <span className="text-muted-foreground" title={t("plans.notApplicableForType")}>
@@ -266,7 +282,7 @@ export default function PlansPage() {
                                 onClick={() => {
                                   const url = `${window.location.origin}/pay/${p.checkout_id}`
                                   navigator.clipboard.writeText(url)
-                                  showToast(t("plans.linkCopied"))
+                                  showToast(t("plans.linkCopied"), "success")
                                 }}
                               >
                                 <Copy className="h-4 w-4" />
@@ -419,6 +435,9 @@ function PlanDialog({
     signup_daily_cap: plan?.signup_daily_cap ?? 0,
     signup_consent_text: plan?.signup_consent_text || "",
     trial_fallback_plan_id: plan?.trial_fallback_plan_id || "",
+    per_seat: plan?.per_seat ?? false,
+    min_quantity: plan?.min_quantity ?? 1,
+    max_quantity: plan?.max_quantity ?? 100,
   })
 
   const set = (key: string, val: string | number | boolean) => setForm((f) => ({ ...f, [key]: val }))
@@ -436,6 +455,10 @@ function PlanDialog({
   const setLicenseType = (v: string) => {
     setForm((f) => ({ ...f, license_type: v, billing_interval: v === "perpetual" ? "" : f.billing_interval }))
   }
+  // Only subscriptions are sold per seat; the option goes away, and off,
+  // for any other type.
+  const canPerSeat = form.license_type === "subscription"
+  const perSeat = canPerSeat && form.per_seat
 
   // Capability map keyed by the currently-selected product's type.
   // Mirrors backend model.ProductSupports — DO NOT diverge or admins
@@ -485,6 +508,15 @@ function PlanDialog({
   // max_activations=3 for a saas product just because the form
   // pre-filled it before the product was selected).
   const handleSubmit = () => {
+    // The range a plan sold per seat is bought in, checked here so the
+    // error is in the admin's language (the server checks it too).
+    if (
+      perSeat &&
+      !(form.min_quantity >= 1 && form.min_quantity <= form.max_quantity && form.max_quantity <= MAX_PLAN_QUANTITY)
+    ) {
+      showToast(t("plans.quantityRangeInvalid", { max: MAX_PLAN_QUANTITY }), "error")
+      return
+    }
     const payload: Partial<Plan> & Record<string, unknown> = { ...form }
     if (!supports.activations) {
       payload.max_activations = 0
@@ -494,6 +526,15 @@ function PlanDialog({
     }
     if (!supports.seats) {
       payload.max_seats = 0
+    }
+    // A plan sold per seat holds the seats bought; the server keeps
+    // max_seats for it. On any other plan the bounds are not used.
+    payload.per_seat = perSeat
+    if (perSeat) {
+      delete payload.max_seats
+    } else {
+      delete payload.min_quantity
+      delete payload.max_quantity
     }
     // A price, an update period or renewals set here switch self
     // sign-up off rather than have the save refused.
@@ -599,9 +640,63 @@ function PlanDialog({
                   </SelectContent>
                 </Select>
               </div>
+              {canPerSeat && (
+                <div className="space-y-2 sm:col-span-2">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={form.per_seat}
+                      // Set when the plan is created (the server refuses a switch).
+                      disabled={!!plan}
+                      onChange={(e) => set("per_seat", e.target.checked)}
+                      className="h-4 w-4 rounded border-input accent-primary"
+                      id="plan-per-seat"
+                    />
+                    <Label htmlFor="plan-per-seat">{t("plans.perSeat")}</Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {productType === "desktop"
+                      ? t("plans.perSeatHintDesktop")
+                      : productType === "saas"
+                        ? t("plans.perSeatHintSaas")
+                        : t("plans.perSeatHintHybrid")}
+                  </p>
+                  {plan && <p className="text-xs text-muted-foreground">{t("plans.perSeatLocked")}</p>}
+                </div>
+              )}
+              {perSeat && (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t("plans.minQuantity")}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={form.min_quantity}
+                      onChange={(e) => set("min_quantity", Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.maxQuantity")}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={form.max_quantity}
+                      onChange={(e) => set("max_quantity", Number(e.target.value))}
+                    />
+                  </div>
+                </>
+              )}
               {supports.activations && (
                 <div className="space-y-2">
-                  <Label>{t("plans.maxActivations")}</Label>
+                  <Label>
+                    {perSeat
+                      ? form.license_model === "floating"
+                        ? t("plans.sessionsPerSeat")
+                        : t("plans.devicesPerSeat")
+                      : t("plans.maxActivations")}
+                  </Label>
                   <Input
                     type="number"
                     min={1}
@@ -611,7 +706,7 @@ function PlanDialog({
                   />
                 </div>
               )}
-              {supports.seats && (
+              {supports.seats && !perSeat && (
                 <div className="space-y-2">
                   <Label>{t("plans.maxSeats")}</Label>
                   <Input

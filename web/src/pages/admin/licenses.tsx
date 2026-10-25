@@ -11,11 +11,12 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCw,
   Search,
   Trash2,
   Unlink,
 } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { CopyableId } from "@/components/copyable-id"
 import { PlanSelect } from "@/components/plan-select"
@@ -62,7 +63,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { type TranslationKeys, useI18n } from "@/i18n"
-import { admin, type Plan } from "@/lib/api"
+import { type AdminSeat, admin, errorCode, errorDetails, type License, type Plan } from "@/lib/api"
 import { formatDate, maskKey, statusColor } from "@/lib/utils"
 
 // A date picked in the expiry field means "valid through that whole
@@ -173,7 +174,7 @@ export default function LicensesPage() {
         <div className="relative w-full sm:w-auto sm:flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder={t("common.search")}
+            placeholder={t("licenses.searchPlaceholder")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9"
@@ -262,7 +263,7 @@ export default function LicensesPage() {
                               lic.plan?.license_model === "floating"
                                 ? (lic.active_session_count ?? 0)
                                 : (lic.activation_count ?? 0)
-                            } / ${lic.plan?.max_activations || "-"}`}
+                            } / ${(lic.activation_limit ?? lic.plan?.max_activations) || "-"}`}
                       </DataTableCell>
                       <DataTableCell>
                         <Badge className={statusColor(lic.status)}>
@@ -573,11 +574,36 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // The key is not in the detail payload — it is fetched per click and
   // the server audits each reveal. Keep it in component state only, so
   // it lives no longer than the open dialog.
-  const [revealedKey, setRevealedKey] = useState<string | null>(null)
+  const [revealed, setRevealedKey] = useState<string | null>(null)
+  // A key whose hint is no longer the licence's (reissued meanwhile) is
+  // not shown or copied.
+  const revealedKey = revealed && (!lic?.license_key_hint || revealed.endsWith(lic.license_key_hint)) ? revealed : null
   const revealMut = useMutation({
     mutationFn: () => admin.revealLicenseKey(id),
     onSuccess: (r) => setRevealedKey(r.license_key),
     onError: (e: Error) => showToast(e.message, "error"),
+  })
+  // A new key for the licence: the old one and the devices it activated
+  // stop; members keep their own keys. The new key is shown at once, as
+  // a reveal would.
+  const [confirmRotate, setConfirmRotate] = useState(false)
+  // Set as the confirmation is pressed, before the mutation is pending,
+  // so a double click cannot reissue twice.
+  const rotating = useRef(false)
+  const rotateMut = useMutation({
+    mutationFn: () => admin.rotateLicenseKey(id),
+    meta: { ownErrors: true },
+    onSuccess: (r) => {
+      setRevealedKey(r.license_key)
+      showToast(t("licenses.rotateKeyDone"), "success")
+      qc.invalidateQueries({ queryKey: ["admin", "license", id] })
+      qc.invalidateQueries({ queryKey: ["admin", "licenses"] })
+    },
+    onError: (e: Error) => showToast(e.message, "error"),
+    onSettled: () => {
+      rotating.current = false
+      setConfirmRotate(false)
+    },
   })
   const copyKey = () => {
     const write = (key: string) => {
@@ -638,6 +664,17 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       <Button variant="ghost" size="icon" className="h-6 w-6" onClick={copyKey}>
                         {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
                       </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        title={t("licenses.rotateKey")}
+                        aria-label={t("licenses.rotateKey")}
+                        disabled={rotateMut.isPending}
+                        onClick={() => setConfirmRotate(true)}
+                      >
+                        <RotateCw className="h-3 w-3" />
+                      </Button>
                     </div>
                   </div>
                   <div>
@@ -654,6 +691,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     <p className="text-muted-foreground">{t("common.plan")}</p>
                     <p className="mt-1 font-medium">{lic.plan?.name || "-"}</p>
                   </div>
+                  {lic.plan?.per_seat && <QuantityField license={lic} />}
                   <div>
                     <p className="text-muted-foreground">{t("licenses.validFrom")}</p>
                     <p className="mt-1">{formatDate(lic.valid_from)}</p>
@@ -986,8 +1024,8 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     <Separator />
                     <div>
                       <h3 className="font-semibold mb-3">
-                        {t("licenses.activations")} ({lic.activations?.length || 0} / {lic.plan?.max_activations || "-"}
-                        )
+                        {t("licenses.activations")} ({lic.activations?.length || 0} /{" "}
+                        {(lic.activation_limit ?? lic.plan?.max_activations) || "-"})
                       </h3>
                       {lic.activations && lic.activations.length > 0 ? (
                         <DataTable>
@@ -996,6 +1034,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                               <DataTableHead>{t("licenses.identifier")}</DataTableHead>
                               <DataTableHead>{t("licenses.type")}</DataTableHead>
                               <DataTableHead>{t("licenses.label")}</DataTableHead>
+                              <DataTableHead>{t("licenses.keyHolder")}</DataTableHead>
                               <DataTableHead>{t("licenses.lastVerified")}</DataTableHead>
                               <DataTableHead className="w-12" />
                             </DataTableRow>
@@ -1012,6 +1051,9 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                                   <Badge variant="secondary">{act.identifier_type}</Badge>
                                 </DataTableCell>
                                 <DataTableCell className="text-muted-foreground">{act.label || "-"}</DataTableCell>
+                                <DataTableCell className="text-muted-foreground text-xs break-all">
+                                  {act.member_email ?? t("licenses.keyHolderLicense")}
+                                </DataTableCell>
                                 <DataTableCell className="text-muted-foreground text-xs">
                                   {formatDate(act.last_verified)}
                                 </DataTableCell>
@@ -1066,7 +1108,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
             <TabsContent value="seats" className="-mr-6 min-h-0 flex-1 overflow-y-auto pr-6">
               <SeatsTab
                 licenseId={id}
-                maxSeats={lic?.plan?.max_seats || 0}
+                maxSeats={lic?.seat_limit ?? lic?.plan?.max_seats ?? 0}
                 hasSeats={lic?.product?.type === "saas" || lic?.product?.type === "hybrid"}
                 ownerEmail={lic?.email ?? ""}
               />
@@ -1094,6 +1136,31 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
               <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
               <AlertDialogAction onClick={() => unlinkMut.mutate()} disabled={unlinkMut.isPending}>
                 {unlinkMut.isPending ? t("common.loading") : t("licenses.unlink")}
+              </AlertDialogAction>
+            </div>
+          </AlertDialogContent>
+        </AlertDialog>
+        <AlertDialog open={confirmRotate} onOpenChange={(o) => !o && !rotateMut.isPending && setConfirmRotate(false)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("licenses.rotateKeyTitle")}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {t("licenses.rotateKeyDesc")} {t("licenses.rotateKeyAdminNote")}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="flex justify-end gap-2">
+              <AlertDialogCancel disabled={rotateMut.isPending}>{t("common.cancel")}</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-white hover:bg-destructive/90"
+                disabled={rotateMut.isPending}
+                onClick={(e) => {
+                  e.preventDefault()
+                  if (rotating.current) return
+                  rotating.current = true
+                  rotateMut.mutate()
+                }}
+              >
+                {t("licenses.rotateKey")}
               </AlertDialogAction>
             </div>
           </AlertDialogContent>
@@ -1259,16 +1326,14 @@ function UsageTab({ licenseId }: { licenseId: string }) {
   )
 }
 
-// SeatsTab is READ-ONLY by design.
+// SeatsTab is the licence's members as support sees them: each one's
+// own key (masked; shown on request, audited, as the licence's key is),
+// their devices, and what support does for a customer: take a member off
+// or cancel an invitation, and reissue a member's key that got out.
 //
-// Keygate's bundled UI doesn't expose seat / team management on
-// purpose: the platform's job is license-key issuance, not team
-// management. The seats data model + API endpoints exist for
-// merchant integrations that want to wire team UX into their own
-// product, but our admin console only reads the current state for
-// support / debugging ("how many seats has ACME used?"). Inviting
-// someone onto a customer's license from this view would let an
-// operator change a team's composition without consent.
+// It does not invite. Adding someone to a customer's licence is the
+// owner's to decide; an operator doing it from here would change who
+// uses the licence without their consent.
 function SeatsTab({
   licenseId,
   maxSeats,
@@ -1281,24 +1346,102 @@ function SeatsTab({
   ownerEmail: string
 }) {
   const { t } = useI18n()
+  const qc = useQueryClient()
   const pg = useServerPagination(20)
   const { data, isLoading } = useQuery({
     queryKey: ["admin", "license-seats", licenseId, pg.page, pg.pageSize],
     queryFn: () => admin.getLicenseSeats(licenseId, pg.params),
   })
+  // Keys shown, by seat, only while this tab is open. One whose hint no
+  // longer matches the seat's (reissued meanwhile, by another admin or
+  // through the API) is dropped rather than shown or copied.
+  const [shown, setShown] = useState<Record<string, string>>({})
+  const shownKey = (seat: AdminSeat) => {
+    const key = shown[seat.id]
+    return key && (!seat.key_hint || key.endsWith(seat.key_hint)) ? key : undefined
+  }
+  // Set as a confirmation is pressed, before the mutation is pending, so
+  // a double click cannot send it twice.
+  const submitting = useRef(false)
+  // The server's codes, in the admin's language.
+  const seatError = (e: Error) =>
+    errorCode(e) === "SEAT_NOT_JOINED"
+      ? t("licenses.seatNotJoined")
+      : ["SEAT_NOT_FOUND", "NOT_FOUND", "LICENSE_NOT_FOUND"].includes(errorCode(e) ?? "")
+        ? t("licenses.seatGone")
+        : e.message
+  const [copied, setCopied] = useState<string | null>(null)
+  // The seat a confirmation asks about stays set while it closes.
+  const [asking, setAsking] = useState<{ seat: AdminSeat; action: "remove" | "reissue" } | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["admin", "license-seats", licenseId] })
+    qc.invalidateQueries({ queryKey: ["admin", "license", licenseId] })
+    qc.invalidateQueries({ queryKey: ["admin", "licenses"] })
+  }
+
+  const revealMut = useMutation({
+    mutationFn: (seat: AdminSeat) => admin.revealMemberKey(licenseId, seat.id),
+    meta: { ownErrors: true },
+    onSuccess: (r, seat) => setShown((m) => ({ ...m, [seat.id]: r.license_key })),
+    onError: (e: Error) => {
+      refresh()
+      showToast(seatError(e), "error")
+    },
+  })
+  const reissueMut = useMutation({
+    mutationFn: (seat: AdminSeat) => admin.rotateMemberKey(licenseId, seat.id),
+    meta: { ownErrors: true },
+    onSuccess: (r, seat) => {
+      setShown((m) => ({ ...m, [seat.id]: r.license_key }))
+      showToast(t("licenses.memberKeyReissued"), "success")
+    },
+    onError: (e: Error) => showToast(seatError(e), "error"),
+    onSettled: () => {
+      submitting.current = false
+      refresh()
+      setConfirming(false)
+    },
+  })
+  const removeMut = useMutation({
+    mutationFn: (seat: AdminSeat) => admin.removeLicenseSeat(licenseId, seat.id),
+    meta: { ownErrors: true },
+    onSuccess: (_, seat) =>
+      showToast(t(seat.accepted_at ? "licenses.memberRemoved" : "licenses.inviteCancelled"), "success"),
+    onError: (e: Error) => showToast(seatError(e), "error"),
+    onSettled: () => {
+      submitting.current = false
+      refresh()
+      setConfirming(false)
+    },
+  })
+  const copy = (seat: AdminSeat) => {
+    const write = (key: string) => {
+      navigator.clipboard.writeText(key)
+      setCopied(seat.id)
+      setTimeout(() => setCopied((c) => (c === seat.id ? null : c)), 2000)
+    }
+    const key = shownKey(seat)
+    if (key) write(key)
+    else revealMut.mutate(seat, { onSuccess: (r) => write(r.license_key) })
+  }
 
   const { items: seats, total, totalPages } = pg.from(data, data?.seats)
   // active_count is the members; on a product with seats max_seats
   // counts the owner too, who holds one without a row.
   const activeCount = (data?.active_count ?? 0) + (hasSeats ? 1 : 0)
+  const busy = reissueMut.isPending || removeMut.isPending
 
   if (isLoading) return <div className="h-32 animate-pulse bg-muted rounded-lg" />
 
   return (
     <div className="space-y-4 pt-2">
       <h3 className="font-semibold">
-        {t("licenses.seats")} ({activeCount}
-        {maxSeats > 0 ? ` / ${maxSeats}` : ""} {t("licenses.active")})
+        {t("licenses.seats")} (
+        {maxSeats > 0
+          ? t("licenses.seatsUsedOf").replace("{used}", String(activeCount)).replace("{max}", String(maxSeats))
+          : t("licenses.seatsUsed").replace("{used}", String(activeCount))}
+        )
       </h3>
       {hasSeats && <p className="text-xs text-muted-foreground">{t("licenses.seatsIncludeOwner")}</p>}
       {seats.length === 0 ? (
@@ -1308,37 +1451,123 @@ function SeatsTab({
           <DataTableHeader>
             <DataTableRow>
               <DataTableHead>{t("common.email")}</DataTableHead>
-              <DataTableHead>{t("licenses.role")}</DataTableHead>
-              <DataTableHead>{t("common.status")}</DataTableHead>
-              <DataTableHead>{t("licenses.invited")}</DataTableHead>
-              <DataTableHead>{t("licenses.accepted")}</DataTableHead>
+              <DataTableHead>{t("licenses.activations")}</DataTableHead>
+              <DataTableHead className="text-right">{t("common.actions")}</DataTableHead>
             </DataTableRow>
           </DataTableHeader>
           <DataTableBody>
-            {seats.map((s) => (
-              <DataTableRow key={s.id}>
-                <DataTableCell className="font-medium">{s.email}</DataTableCell>
-                <DataTableCell>
-                  {/* A seat at the owner's own address (the license email
-                    changed to a member's) is the owner, not counted as a
-                    member in active_count. */}
-                  <Badge variant="secondary">
-                    {s.email.toLowerCase() === ownerEmail.toLowerCase() ? t("portal.roleOwner") : s.role}
-                  </Badge>
-                </DataTableCell>
-                <DataTableCell>
-                  {s.removed_at ? (
-                    <Badge className="bg-red-100 text-red-800">{t("licenses.removed")}</Badge>
-                  ) : s.accepted_at ? (
-                    <Badge className="bg-emerald-100 text-emerald-800">{t("licenses.active")}</Badge>
-                  ) : (
-                    <Badge className="bg-amber-100 text-amber-800">{t("licenses.pending")}</Badge>
-                  )}
-                </DataTableCell>
-                <DataTableCell className="text-muted-foreground text-xs">{formatDate(s.invited_at)}</DataTableCell>
-                <DataTableCell className="text-muted-foreground text-xs">{formatDate(s.accepted_at)}</DataTableCell>
-              </DataTableRow>
-            ))}
+            {seats.map((s) => {
+              const joined = !!s.accepted_at && !s.removed_at
+              const expired =
+                !s.accepted_at && !!s.invite_expires_at && new Date(s.invite_expires_at).getTime() < Date.now()
+              return (
+                <DataTableRow key={s.id}>
+                  <DataTableCell>
+                    <div className="font-medium break-all">{s.email}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      {/* A seat at the owner's own address (the license email
+                        changed to a member's) is the owner, not counted as a
+                        member in active_count. */}
+                      <Badge variant="secondary">
+                        {s.email.toLowerCase() === ownerEmail.toLowerCase()
+                          ? t("portal.roleOwner")
+                          : t("portal.roleMember")}
+                      </Badge>
+                      {joined && s.paused ? (
+                        <Badge className="bg-amber-100 text-amber-800" title={t("portal.seatPausedHint")}>
+                          {t("portal.seatPaused")}
+                        </Badge>
+                      ) : joined ? (
+                        <Badge className="bg-emerald-100 text-emerald-800">{t("licenses.active")}</Badge>
+                      ) : expired ? (
+                        <Badge className="bg-red-100 text-red-800">{t("portal.inviteExpired")}</Badge>
+                      ) : (
+                        <Badge className="bg-amber-100 text-amber-800">{t("licenses.pending")}</Badge>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        {joined
+                          ? `${t("licenses.accepted")} ${formatDate(s.accepted_at)}`
+                          : `${t("licenses.invited")} ${formatDate(s.invited_at)}`}
+                      </span>
+                    </div>
+                    {/* The member's own key, under the address so the row
+                      fits a narrow screen. */}
+                    {joined && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                        <span className="basis-full text-xs text-muted-foreground sm:basis-auto">
+                          {t("licenses.memberKey")}
+                        </span>
+                        <code
+                          className={`min-w-0 bg-muted px-1.5 py-0.5 rounded text-xs ${shownKey(s) ? "break-all" : "whitespace-nowrap"}`}
+                        >
+                          {shownKey(s) ?? maskKey(s.key_hint, s.key_prefix)}
+                        </code>
+                        {!shownKey(s) && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0"
+                            title={t("licenses.revealKey")}
+                            aria-label={t("licenses.revealKey")}
+                            disabled={revealMut.isPending && revealMut.variables?.id === s.id}
+                            onClick={() => revealMut.mutate(s)}
+                          >
+                            <Eye className="h-3 w-3" />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 shrink-0"
+                          title={t("common.copy")}
+                          aria-label={t("common.copy")}
+                          onClick={() => copy(s)}
+                        >
+                          {copied === s.id ? (
+                            <Check className="h-3 w-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                  </DataTableCell>
+                  <DataTableCell className="text-muted-foreground">{joined ? s.device_count : "-"}</DataTableCell>
+                  <DataTableCell className="text-right whitespace-nowrap">
+                    {joined && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        title={t("licenses.rotateKey")}
+                        aria-label={t("licenses.rotateKey")}
+                        disabled={busy}
+                        onClick={() => {
+                          setAsking({ seat: s, action: "reissue" })
+                          setConfirming(true)
+                        }}
+                      >
+                        <RotateCw className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-destructive"
+                      title={t(joined ? "portal.removeMember" : "portal.cancelInvite")}
+                      aria-label={t(joined ? "portal.removeMember" : "portal.cancelInvite")}
+                      disabled={busy}
+                      onClick={() => {
+                        setAsking({ seat: s, action: "remove" })
+                        setConfirming(true)
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </DataTableCell>
+                </DataTableRow>
+              )
+            })}
           </DataTableBody>
         </DataTable>
       )}
@@ -1352,6 +1581,44 @@ function SeatsTab({
           onPageSizeChange={pg.setPageSize}
         />
       )}
+
+      <AlertDialog open={confirming} onOpenChange={(o) => !o && !busy && setConfirming(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {asking?.action === "reissue"
+                ? t("licenses.reissueMemberKeyTitle").replace("{email}", asking.seat.email)
+                : t(asking?.seat.accepted_at ? "portal.removeMemberTitle" : "portal.cancelInviteTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {(asking?.action === "reissue"
+                ? t("licenses.reissueMemberKeyDesc")
+                : t(asking?.seat.accepted_at ? "licenses.adminRemoveMemberDesc" : "licenses.adminCancelInviteDesc")
+              ).replace("{email}", asking?.seat.email ?? "")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex justify-end gap-2">
+            <AlertDialogCancel disabled={busy}>
+              {t(asking?.action === "remove" && !asking.seat.accepted_at ? "portal.keepInvite" : "common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={busy}
+              onClick={(e) => {
+                e.preventDefault()
+                if (!asking || submitting.current) return
+                submitting.current = true
+                if (asking.action === "reissue") reissueMut.mutate(asking.seat)
+                else removeMut.mutate(asking.seat)
+              }}
+            >
+              {asking?.action === "reissue"
+                ? t("licenses.rotateKey")
+                : t(asking?.seat.accepted_at ? "portal.removeMember" : "portal.cancelInvite")}
+            </AlertDialogAction>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -1423,5 +1690,113 @@ function ChangePlanDialog({
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// QuantityField shows the seats a license on a plan sold per seat holds.
+// A Stripe subscription's seats are Stripe's, changed by the customer in
+// the portal or in Stripe; any other license's are set here.
+function QuantityField({ license }: { license: License }) {
+  const { t } = useI18n()
+  const qc = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(String(license.quantity ?? 1))
+  const n = Number(value)
+  // What the plan sells, as a checkout or the portal would allow.
+  const min = license.plan?.min_quantity ?? 1
+  const max = license.plan?.max_quantity ?? 10000
+  const valid = Number.isInteger(n) && n >= min && n <= max
+  const saveMut = useMutation({
+    mutationFn: () => admin.setLicenseQuantity(license.id, n),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "license", license.id] })
+      qc.invalidateQueries({ queryKey: ["admin", "licenses"] })
+      setEditing(false)
+      showToast(t("licenses.quantitySaved"), "success")
+    },
+    meta: { ownErrors: true },
+    onError: (e: Error) => {
+      // Billed by Stripe, or moved off a plan sold per seat, meanwhile:
+      // the field shows the licence as it is now.
+      if (errorCode(e) === "STRIPE_MANAGED" || errorCode(e) === "NOT_PER_SEAT") {
+        qc.invalidateQueries({ queryKey: ["admin", "license", license.id] })
+        setEditing(false)
+      }
+      // Below what the licence uses: the same refusal the portal gives
+      // its owner, who frees the room first.
+      const d = errorDetails(e) ?? {}
+      showToast(
+        errorCode(e) === "STRIPE_MANAGED"
+          ? t("licenses.quantityStripeManaged")
+          : errorCode(e) === "NOT_PER_SEAT"
+            ? t("licenses.quantityNotPerSeat")
+            : errorCode(e) === "QUANTITY_OUT_OF_RANGE"
+              ? t("licenses.quantityOutOfRange")
+                  .replace("{min}", String(d.min ?? min))
+                  .replace("{max}", String(d.max ?? max))
+              : errorCode(e) === "SEATS_IN_USE"
+                ? t("portal.changeSeatsInUse")
+                    .replace("{people}", String(d.in_use ?? ""))
+                    .replace("{seats}", String(d.seat_limit ?? n))
+                : errorCode(e) === "DEVICES_IN_USE"
+                  ? t(d.kind === "sessions" ? "portal.changeSessionsInUse" : "portal.changeDevicesInUse")
+                      .replace("{inUse}", String(d.in_use ?? ""))
+                      .replace("{limit}", String(d.activation_limit ?? ""))
+                  : e.message,
+        "error",
+      )
+    },
+  })
+  const stripeManaged = !!license.stripe_subscription_id
+  return (
+    <div>
+      <p className="text-muted-foreground">{t("licenses.seatsBought")}</p>
+      {editing ? (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <Input
+            type="number"
+            min={min}
+            max={max}
+            className="h-8 w-24"
+            aria-label={t("licenses.seatsBought")}
+            value={value}
+            autoFocus
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && valid && !saveMut.isPending) saveMut.mutate()
+            }}
+          />
+          <Button size="sm" className="h-8" disabled={!valid || saveMut.isPending} onClick={() => saveMut.mutate()}>
+            {t("common.save")}
+          </Button>
+          <Button size="sm" variant="ghost" className="h-8" onClick={() => setEditing(false)}>
+            {t("common.cancel")}
+          </Button>
+          {/* Why Save may be off: the plan's range. */}
+          <p className={`basis-full text-xs ${valid ? "text-muted-foreground" : "text-destructive"}`}>
+            {t("licenses.quantityOutOfRange").replace("{min}", String(min)).replace("{max}", String(max))}
+          </p>
+        </div>
+      ) : (
+        <div className="mt-1 flex items-center gap-2">
+          <span className="font-medium">{license.quantity ?? 1}</span>
+          {stripeManaged ? (
+            <span className="text-xs text-muted-foreground">{t("licenses.quantityStripe")}</span>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={() => {
+                setValue(String(license.quantity ?? 1))
+                setEditing(true)
+              }}
+            >
+              {t("common.edit")}
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

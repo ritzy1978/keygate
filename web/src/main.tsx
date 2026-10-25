@@ -31,7 +31,10 @@ import "./index.css"
 
 const queryClient = new QueryClient({
   mutationCache: new MutationCache({
-    onError: (error) => {
+    // A mutation that shows its own errors (translated, in place) sets
+    // meta.ownErrors, so they are not shown twice.
+    onError: (error, _vars, _ctx, mutation) => {
+      if (mutation.meta?.ownErrors) return
       showToast(error instanceof Error ? error.message : "An error occurred")
     },
   }),

@@ -676,8 +676,12 @@ func (s *Store) GetRetentionData(ctx context.Context, productID string, months i
 }
 
 type UserDetail struct {
-	User          *model.User           `json:"user"`
-	Licenses      []*model.License      `json:"licenses"`
+	User     *model.User      `json:"user"`
+	Licenses []*model.License `json:"licenses"`
+	// Memberships are the seats the customer holds on other people's
+	// licences, each with its licence: where they are a member, not the
+	// owner.
+	Memberships   []*model.Seat         `json:"memberships"`
 	Subscriptions []*model.Subscription `json:"subscriptions"`
 	TotalUsage    int64                 `json:"total_usage"`
 	ActiveSeats   int                   `json:"active_seats"`
@@ -704,6 +708,20 @@ func (s *Store) GetUserDetail(ctx context.Context, userID string) (*UserDetail, 
 		return nil, err
 	}
 	detail.Licenses = licenses
+
+	// Joined seats only: an invitation not yet accepted gives no access.
+	// An empty list, not null, when there are none.
+	memberships := []*model.Seat{}
+	if err := s.DB.NewSelect().Model(&memberships).
+		Relation("License").Relation("License.Product").Relation("License.Plan").
+		Where("seat.accepted_at IS NOT NULL AND seat.removed_at IS NULL").
+		Where("(seat.user_id = ? OR lower(seat.email) = ?)", userID, normalizeEmail(user.Email)).
+		Where("NOT (coalesce(license.user_id, '') = ? OR lower(license.email) = ?)", userID, normalizeEmail(user.Email)).
+		OrderExpr("seat.accepted_at DESC").
+		Scan(ctx); err != nil {
+		return nil, err
+	}
+	detail.Memberships = memberships
 
 	subs, err := s.ListSubscriptionsByUser(ctx, userID)
 	if err == nil {

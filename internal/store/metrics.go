@@ -21,7 +21,8 @@ var LicenseKeyDecryptFailures = promauto.NewCounter(prometheus.CounterOpts{
 })
 
 // LicenseKeysUnencrypted is a gauge for the count of license rows where
-// license_key_encrypted IS NULL but license_key is non-empty. This is the
+// license_key_encrypted IS NULL but license_key is non-empty, plus the
+// members' keys in the same state (seats.member_key). This is the
 // number of rows that still need backfill before Phase B can flip the
 // read path to encrypted-only.
 //

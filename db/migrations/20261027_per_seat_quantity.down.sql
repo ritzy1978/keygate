@@ -1,0 +1,12 @@
+ALTER TABLE license_upgrades DROP COLUMN IF EXISTS from_quantity;
+DROP INDEX IF EXISTS licenses_terms_held_idx;
+ALTER TABLE licenses DROP COLUMN IF EXISTS terms_check_after;
+ALTER TABLE licenses DROP COLUMN IF EXISTS terms_held_until;
+ALTER TABLE licenses DROP COLUMN IF EXISTS stripe_pending_update_expires_at;
+ALTER TABLE licenses DROP CONSTRAINT IF EXISTS licenses_quantity_check;
+ALTER TABLE licenses DROP COLUMN IF EXISTS quantity;
+ALTER TABLE plans DROP CONSTRAINT IF EXISTS plans_per_seat_subscription_check;
+ALTER TABLE plans DROP CONSTRAINT IF EXISTS plans_quantity_range_check;
+ALTER TABLE plans DROP COLUMN IF EXISTS max_quantity;
+ALTER TABLE plans DROP COLUMN IF EXISTS min_quantity;
+ALTER TABLE plans DROP COLUMN IF EXISTS per_seat;

@@ -28,12 +28,14 @@ func (h *SeatHandler) AddSeat(c *gin.Context) {
 
 	productID, _ := c.Get("product_id")
 	actor, _ := c.Get("user_id")
+	actorEmail, _ := c.Get("email")
 	seat, err := h.svc.AddSeat(c.Request.Context(), service.AddSeatInput{
 		LicenseKey:  req.LicenseKey,
 		Email:       req.Email,
 		Role:        req.Role,
 		ProductID:   str(productID),
 		ActorUserID: str(actor),
+		ActorEmail:  str(actorEmail),
 	})
 	if err != nil {
 		writeAppErr(c, err)
@@ -54,7 +56,8 @@ func (h *SeatHandler) RemoveSeat(c *gin.Context) {
 
 	productID, _ := c.Get("product_id")
 	actor, _ := c.Get("user_id")
-	err := h.svc.RemoveSeat(c.Request.Context(), req.LicenseKey, req.SeatID, str(productID), str(actor))
+	actorEmail, _ := c.Get("email")
+	err := h.svc.RemoveSeat(c.Request.Context(), req.LicenseKey, req.SeatID, str(productID), str(actor), str(actorEmail))
 	if err != nil {
 		writeAppErr(c, err)
 		return
@@ -72,7 +75,7 @@ func (h *SeatHandler) ListSeats(c *gin.Context) {
 	}
 
 	productID, _ := c.Get("product_id")
-	seats, err := h.svc.ListSeats(c.Request.Context(), req.LicenseKey, str(productID))
+	seats, err := h.svc.ListSeats(c.Request.Context(), req.LicenseKey, str(productID), emailFromContext(c))
 	if err != nil {
 		writeAppErr(c, err)
 		return

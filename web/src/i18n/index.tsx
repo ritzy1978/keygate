@@ -42,7 +42,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       let text = locales[locale]?.[key] || locales.en[key] || key
       if (params) {
         for (const [k, v] of Object.entries(params)) {
-          text = text.replace(`{${k}}`, String(v))
+          text = text.replaceAll(`{${k}}`, String(v))
         }
       }
       return text
@@ -64,7 +64,7 @@ const fallbackI18n: I18nContextType = {
   setLocale: () => {},
   t: (key, params) => {
     let text: string = en[key] || key
-    if (params) for (const [k, v] of Object.entries(params)) text = text.replace(`{${k}}`, String(v))
+    if (params) for (const [k, v] of Object.entries(params)) text = text.replaceAll(`{${k}}`, String(v))
     return text
   },
 }

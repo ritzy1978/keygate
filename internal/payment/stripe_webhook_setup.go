@@ -34,6 +34,8 @@ var stripeWebhookEvents = []*string{
 	stripe.String("invoice.payment_failed"),
 	stripe.String("customer.subscription.deleted"),
 	stripe.String("customer.subscription.updated"),
+	stripe.String("customer.subscription.pending_update_applied"),
+	stripe.String("customer.subscription.pending_update_expired"),
 	stripe.String("charge.refunded"),
 	stripe.String("charge.dispute.created"),
 	stripe.String("charge.dispute.closed"),

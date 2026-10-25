@@ -66,7 +66,7 @@ Track API calls, storage, bandwidth, or any custom metric. Quotas enforced **ato
 
 ### 💳 Payments
 
-Stripe integrated end-to-end with **three-layer reliability** — webhook, success-page verification, and periodic sync ensure no payment is ever missed. Customer pays → license created automatically. Payment fails → dunning emails on schedule. Supports checkout, plan upgrades/downgrades with proration, cancellations, refunds, billing portal, and one-time renewals of a perpetual license's update period from the customer portal. Stripe webhook is auto-configured — just set your API key.
+Stripe integrated end-to-end with **three-layer reliability** — webhook, success-page verification, and periodic sync ensure no payment is ever missed. Customer pays → license created automatically. Payment fails → dunning emails on schedule. Supports checkout, plan upgrades with proration and downgrades that apply at once and are billed from the next invoice, cancellations, refunds, billing portal, and one-time renewals of a perpetual license's update period from the customer portal. Stripe webhook is auto-configured — just set your API key.
 
 Free plans can take **self sign-up**: the plan's `/pay` link becomes a form where a visitor confirms their email with a login code and gets a license key, one per address per product, with an optional daily cap and marketing-consent checkbox (reported in the `license.created` webhook). No card, no Stripe customer.
 
@@ -74,9 +74,9 @@ A license on a free plan shows **Upgrade** in the portal: the customer pays for 
 
 A trial plan can name a free plan to fall back to: when a trial ends, the license moves to that plan instead of expiring — same key, same activations — and the customer gets a plan-changed email rather than a trial-ended one.
 
-### 👥 Team Seats & Entitlements
+### 👥 Seats & Entitlements
 
-Customers manage their own teams within a license. Seat roles (owner/admin/member), configurable limits per plan. Feature entitlements as boolean flags, numeric limits, or usage quotas. Purchasable add-ons that extend plan capabilities.
+A license holds a number of seats: set per plan, or sold per seat through Stripe, with customers adding or removing seats in the portal. The buyer owns the license and holds one seat, and invites members to the others; each member gets a license key of their own, and removing a member stops their key and frees their devices. If a license ends up with more people than seats (say a plan's seat limit is lowered), the members who joined last are paused until a seat is free. The license's own key stays fixed once issued; an admin reissues it when needed. Feature entitlements as boolean flags, numeric limits, or usage quotas. Purchasable add-ons that extend plan capabilities.
 
 ### 🔧 Server-to-Server API
 

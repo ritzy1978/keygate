@@ -33,6 +33,9 @@ type AdminHandler struct {
 	Email   *service.EmailService
 	Expiry  *service.ExpiryChecker
 	Metered *service.MeteredBillingSyncer
+	// Seats removes a licence's seats for the admin as the owner would
+	// in the portal: one path for webhooks and audit.
+	Seats *service.SeatService
 	// FeedURLTTL is how long a presigned artifact URL inside a public
 	// update feed stays usable (STORAGE_FEED_URL_TTL). Gating a
 	// product's feeds does not reach links already handed out, so an
@@ -865,10 +868,10 @@ func (h *AdminHandler) GetPlan(c *gin.Context) {
 	response.OK(c, p)
 }
 
-// PlanSeatImpact answers how many of the plan's licenses would hold more
-// people than a new max_seats allows, so the dashboard can say so before
+// PlanSeatImpact answers how many of the plan's licenses have more people
+// joined than a new max_seats allows, so the dashboard can say so before
 // an admin lowers it. A change applies to every license on the plan at
-// once; those over the limit keep their members and cannot invite more.
+// once; on those over the limit the members who joined last are paused.
 //
 // GET /admin/plans/:id/seat-impact?max_seats=N → {max_seats, licenses_over}
 func (h *AdminHandler) PlanSeatImpact(c *gin.Context) {
@@ -980,6 +983,11 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		SignupConsentText    string `json:"signup_consent_text"`
 		TrialFallbackPlanID  string `json:"trial_fallback_plan_id"`
 		SortOrder            int    `json:"sort_order"`
+		// PerSeat sells the plan by the seat, between MinQuantity and
+		// MaxQuantity (1 and 100 when left out).
+		PerSeat     bool `json:"per_seat"`
+		MinQuantity int  `json:"min_quantity"`
+		MaxQuantity int  `json:"max_quantity"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "product_id, name, slug, and license_type are required")
@@ -1083,6 +1091,21 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 			"floating license_model is not supported for "+prod.Type+" products")
 		return
 	}
+	if req.MinQuantity == 0 {
+		req.MinQuantity = 1
+	}
+	if req.MaxQuantity == 0 {
+		req.MaxQuantity = max(100, req.MinQuantity)
+	}
+	seat := perSeatFields{PerSeat: req.PerSeat, MinQuantity: req.MinQuantity, MaxQuantity: req.MaxQuantity}
+	if req.MaxSeats, err = normalizePerSeat(req.LicenseType, prod.Type, seat, req.MaxSeats); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	if !req.PerSeat {
+		// Nothing reads them; the defaults keep the row valid.
+		req.MinQuantity, req.MaxQuantity = 1, 100
+	}
 
 	req.StripePriceID = strings.TrimSpace(req.StripePriceID)
 	if err := validateStripePriceID("stripe_price_id", req.StripePriceID); err != nil {
@@ -1135,6 +1158,9 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		SignupDailyCap:       req.SignupDailyCap,
 		SignupConsentText:    req.SignupConsentText,
 		TrialFallbackPlanID:  req.TrialFallbackPlanID,
+		PerSeat:              req.PerSeat,
+		MinQuantity:          req.MinQuantity,
+		MaxQuantity:          req.MaxQuantity,
 		Active:               true,
 		SortOrder:            req.SortOrder,
 	}
@@ -1203,6 +1229,9 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		TrialFallbackPlanID  *string `json:"trial_fallback_plan_id"`
 		Active               *bool   `json:"active"`
 		SortOrder            *int    `json:"sort_order"`
+		PerSeat              *bool   `json:"per_seat"`
+		MinQuantity          *int    `json:"min_quantity"`
+		MaxQuantity          *int    `json:"max_quantity"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
@@ -1279,6 +1308,35 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	licenseType := p.LicenseType
 	if req.LicenseType != nil {
 		licenseType = *req.LicenseType
+	}
+	// Whether a plan sells per seat is set when it is created. Switched
+	// later, the licences on it, and checkouts already open for its
+	// price, would be paid one way and limited the other: a new plan
+	// sells the other way.
+	if req.PerSeat != nil && *req.PerSeat != p.PerSeat {
+		response.Err(c, http.StatusConflict, "PER_SEAT_LOCKED",
+			"whether a plan is sold per seat is set when it is created; create a new plan to sell the other way")
+		return
+	}
+	seat := perSeatFields{PerSeat: p.PerSeat, MinQuantity: p.MinQuantity, MaxQuantity: p.MaxQuantity}
+	if req.MinQuantity != nil {
+		seat.MinQuantity = *req.MinQuantity
+	}
+	if req.MaxQuantity != nil {
+		seat.MaxQuantity = *req.MaxQuantity
+	}
+	maxSeats := p.MaxSeats
+	if req.MaxSeats != nil {
+		maxSeats = *req.MaxSeats
+	}
+	if maxSeats, err = normalizePerSeat(licenseType, prod.Type, seat, maxSeats); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	// A plan sold per seat keeps the max_seats normalizePerSeat gives
+	// it, whatever the request sent.
+	if seat.PerSeat && (req.MaxSeats != nil || maxSeats != p.MaxSeats) {
+		req.MaxSeats = &maxSeats
 	}
 	billingInterval := p.BillingInterval
 	if req.BillingInterval != nil {
@@ -1506,6 +1564,13 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if req.SortOrder != nil {
 		p.SortOrder = *req.SortOrder
 		cols = append(cols, "sort_order")
+	}
+	// The bounds only mean something on a plan sold per seat, and are
+	// only checked there; on any other plan a request's values are left
+	// out rather than stored unchecked.
+	if seat.PerSeat && (req.MinQuantity != nil || req.MaxQuantity != nil) {
+		p.MinQuantity, p.MaxQuantity = seat.MinQuantity, seat.MaxQuantity
+		cols = append(cols, "min_quantity", "max_quantity")
 	}
 
 	if h.beforeCutoffWrite != nil {
@@ -1981,6 +2046,40 @@ type planBounds struct {
 	TokenTTLDays    int // 0 = server default
 }
 
+// perSeatFields are the fields that sell a plan by the seat.
+type perSeatFields struct {
+	PerSeat     bool
+	MinQuantity int
+	MaxQuantity int
+}
+
+// normalizePerSeat checks the per-seat fields against the plan's licence
+// type and returns the max_seats the plan stores with them. A plan sold
+// per seat keeps 1 there on a product with seats and 0 on one without:
+// it holds the seats bought, and a replica that predates per-seat plans
+// reads 1 as the owner alone rather than 0 as no limit (see
+// model.Plan.MaxSeats). A plan not sold per seat keeps the max_seats it
+// was given, and its bounds are not checked: nothing reads them.
+func normalizePerSeat(licenseType, productType string, f perSeatFields, maxSeats int) (int, error) {
+	if !f.PerSeat {
+		return maxSeats, nil
+	}
+	switch {
+	case licenseType != "subscription":
+		return 0, errors.New("per_seat is only available on subscription plans")
+	case f.MinQuantity < 1:
+		return 0, errors.New("min_quantity must be 1 or more")
+	case f.MaxQuantity < f.MinQuantity:
+		return 0, errors.New("max_quantity cannot be less than min_quantity")
+	case f.MaxQuantity > model.MaxPlanQuantity:
+		return 0, fmt.Errorf("max_quantity cannot exceed %d", model.MaxPlanQuantity)
+	}
+	if model.ProductSupports(productType, model.CapSeats) {
+		return 1, nil
+	}
+	return 0, nil
+}
+
 // maxPlanSeats is the owner plus 100000 members. max_seats counts the
 // owner since migration 20261025_seats_include_owner, which raised a
 // plan at the old cap of 100000 to 100001: that plan must still save.
@@ -2182,6 +2281,7 @@ func (h *AdminHandler) ListLicenses(c *gin.Context) {
 	// admin to tell two rows apart, useless to anyone who intercepts
 	// the payload. The key itself comes from RevealLicenseKey.
 	hints, prefixes := h.licenseKeyHints(licenses)
+	model.FillLimits(licenses...)
 	listOK(c, "licenses", licenses, total, page, gin.H{"license_key_hints": hints, "license_key_prefixes": prefixes})
 }
 
@@ -2200,6 +2300,11 @@ func (h *AdminHandler) GetLicense(c *gin.Context) {
 	// deliberate break here is that license_key is gone. The hint
 	// rides alongside them; the key itself is one explicit request
 	// away via RevealLicenseKey.
+	model.FillLimits(l)
+	if err := h.Store.FillMemberEmails(c, l.Activations); err != nil {
+		response.Internal(c, err)
+		return
+	}
 	out := licenseWithHint{License: l, KeyUsable: true}
 	out.LicenseKeyPrefix, out.LicenseKeyHint = h.licenseKeyHint(l)
 	if err := service.LicenseUsable(l); err != nil {
@@ -2419,7 +2524,11 @@ func apperrCode(err error) string {
 // licenseKeyHint is the last four characters of a key — a row label,
 // not a credential — and the prefix of the product that issued it.
 func (h *AdminHandler) licenseKeyHint(l *model.License) (prefix, hint string) {
-	key := h.Store.DecryptLicenseKey(l)
+	return keyHint(h.Store.DecryptLicenseKey(l))
+}
+
+// keyHint is a key's prefix and last four characters.
+func keyHint(key string) (prefix, hint string) {
 	r := []rune(key)
 	if len(r) <= 4 {
 		return "", string(r)
@@ -2823,6 +2932,82 @@ func (h *AdminHandler) SetLicenseValidUntil(c *gin.Context) {
 			})
 		}
 	}
+	model.FillLimits(lic)
+	response.OK(c, lic)
+}
+
+// SetLicenseQuantity sets how many seats a license on a plan sold per
+// seat holds, for one nothing bills: a sale made outside Stripe. A
+// Stripe subscription's quantity is Stripe's, read back from it, so a
+// value set here would be overwritten by the next event; it is refused
+// instead, like the expiry of such a license.
+//
+// POST /admin/licenses/:id/quantity  { quantity }
+func (h *AdminHandler) SetLicenseQuantity(c *gin.Context) {
+	id := c.Param("id")
+	if !h.checkLicenseScope(c, id) {
+		return
+	}
+	var req struct {
+		Quantity int `json:"quantity" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Quantity < 1 || req.Quantity > model.MaxPlanQuantity {
+		response.BadRequest(c, fmt.Sprintf("quantity must be between 1 and %d", model.MaxPlanQuantity))
+		return
+	}
+	prev, err := h.Store.SetLicenseQuantity(c, id, req.Quantity)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		response.NotFound(c, "license not found")
+		return
+	case errors.Is(err, store.ErrQuantityStripeManaged):
+		response.Conflict(c, "STRIPE_MANAGED", "seats for Stripe-billed licenses are managed by the subscription", nil)
+		return
+	case errors.Is(err, store.ErrQuantityNotPerSeat):
+		response.Conflict(c, "NOT_PER_SEAT", "this license's plan is not sold per seat", nil)
+		return
+	}
+	var outOfRange *store.QuantityRangeError
+	var inUse *store.QuantityInUseError
+	switch {
+	case errors.As(err, &outOfRange):
+		response.Conflict(c, "QUANTITY_OUT_OF_RANGE",
+			fmt.Sprintf("this license's plan sells %d to %d seats", outOfRange.Min, outOfRange.Max),
+			gin.H{"min": outOfRange.Min, "max": outOfRange.Max})
+		return
+	case errors.As(err, &inUse) && inUse.Code == "SEATS_IN_USE":
+		response.Conflict(c, "SEATS_IN_USE",
+			fmt.Sprintf("%d people are on or invited to this license; remove %d before going down to %d seats", inUse.InUse, inUse.InUse-inUse.Limit, inUse.Limit),
+			gin.H{"in_use": inUse.InUse, "seat_limit": inUse.Limit})
+		return
+	case errors.As(err, &inUse):
+		response.Conflict(c, "DEVICES_IN_USE",
+			fmt.Sprintf("%d %s in use on this license; free %d before going down to %d", inUse.InUse, inUse.Kind, inUse.InUse-inUse.Limit, inUse.Limit),
+			gin.H{"in_use": inUse.InUse, "activation_limit": inUse.Limit, "kind": inUse.Kind})
+		return
+	case err != nil:
+		response.Internal(c, err)
+		return
+	}
+	lic, err := h.Store.FindLicenseByIDWithCounts(c, id)
+	if err != nil {
+		response.Internal(c, err)
+		return
+	}
+	if prev != req.Quantity {
+		h.Store.Audit(c, &model.AuditLog{
+			Entity: "license", EntityID: id, Action: "quantity_changed",
+			ActorType: "admin", ActorID: adminID(c),
+			Changes: map[string]any{"old_quantity": prev, "new_quantity": req.Quantity},
+		})
+		if h.Webhook != nil {
+			h.Webhook.Dispatch(c, lic.ProductID, model.EventLicenseQuantityChanged, map[string]any{
+				"license_id": id, "email": lic.Email, "plan_id": lic.PlanID,
+				"old_quantity": prev, "new_quantity": req.Quantity,
+			})
+		}
+	}
+	model.FillLimits(lic)
 	response.OK(c, lic)
 }
 
@@ -2968,6 +3153,7 @@ func (h *AdminHandler) SetLicenseUpdatesUntil(c *gin.Context) {
 		}
 		h.Webhook.Dispatch(c, lic.ProductID, model.EventLicenseUpdatesChanged, payload)
 	}
+	model.FillLimits(lic)
 	response.OK(c, lic)
 }
 
@@ -3253,23 +3439,6 @@ func (h *AdminHandler) ResetLicenseUsage(c *gin.Context) {
 	response.OK(c, gin.H{"status": "reset"})
 }
 
-// ─── Seats (admin) ───
-
-func (h *AdminHandler) ListLicenseSeats(c *gin.Context) {
-	id := c.Param("id")
-	if !h.checkLicenseScope(c, id) {
-		return
-	}
-	page := listPage(c)
-	seats, total, err := h.Store.ListSeats(c, id, page)
-	if err != nil {
-		response.Internal(c, err)
-		return
-	}
-	count, _ := h.Store.CountActiveSeats(c, id)
-	listOK(c, "seats", seats, total, page, gin.H{"active_count": count})
-}
-
 // ─── Analytics (admin) ───
 
 func (h *AdminHandler) ListAnalytics(c *gin.Context) {
@@ -3437,11 +3606,23 @@ func (h *AdminHandler) GetUserDetail(c *gin.Context) {
 	// license is which, not the credential itself. The detail keeps
 	// its existing shape and the hints ride alongside it.
 	hints, prefixes := h.licenseKeyHints(detail.Licenses)
+	model.FillLimits(detail.Licenses...)
+	// A membership shows the member's own key, the one they use, by the
+	// same hint.
+	memberHints, memberPrefixes := make(map[string]string), make(map[string]string)
+	for _, seat := range detail.Memberships {
+		if prefix, hint := keyHint(h.Store.DecryptMemberKey(seat)); hint != "" {
+			memberHints[seat.ID], memberPrefixes[seat.ID] = hint, prefix
+		}
+	}
 	response.OK(c, struct {
 		*store.UserDetail
 		LicenseKeyHints    map[string]string `json:"license_key_hints"`
 		LicenseKeyPrefixes map[string]string `json:"license_key_prefixes"`
-	}{UserDetail: detail, LicenseKeyHints: hints, LicenseKeyPrefixes: prefixes})
+		MemberKeyHints     map[string]string `json:"member_key_hints"`
+		MemberKeyPrefixes  map[string]string `json:"member_key_prefixes"`
+	}{UserDetail: detail, LicenseKeyHints: hints, LicenseKeyPrefixes: prefixes,
+		MemberKeyHints: memberHints, MemberKeyPrefixes: memberPrefixes})
 }
 
 // ─── Addons ───
@@ -3749,6 +3930,12 @@ func (h *AdminHandler) ListFloatingSessions(c *gin.Context) {
 
 // ─── Change Plan (admin) ───
 
+// seatsInUseError refuses a change of plan that seats fewer people than
+// the licence has.
+type seatsInUseError struct{ inUse, limit int }
+
+func (e *seatsInUseError) Error() string { return "SEATS_IN_USE" }
+
 func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
@@ -3804,6 +3991,9 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	// that log to answer "why is this licence active now" and "who
 	// moved its expiry date".
 	newStatus, newValidUntil := "", ""
+	// Seats carried to a plan sold per seat, when they changed: they set
+	// both the people and the devices the licence holds.
+	oldQuantity, newQuantity := 0, 0
 	if h.beforeCutoffWrite != nil {
 		h.beforeCutoffWrite()
 	}
@@ -3838,11 +4028,11 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		// is Stripe's to change, not this endpoint's: nothing here
 		// moves the subscription, so Stripe would keep charging the
 		// old price while the admin panel, the portal and the
-		// subscription row all showed the new plan — and nothing
-		// reconciles it afterwards, since
-		// customer.subscription.updated syncs status and dates but
-		// never plan_id. The portal's change-plan does it in the
-		// right order, Stripe first. A plan's Stripe price is unique,
+		// subscription row all showed the new plan, until the next
+		// subscription event put the plan of the price Stripe bills
+		// back. The portal's change-plan does it in the right order,
+		// Stripe first, and a price moved in Stripe itself reaches the
+		// licence through that sync. A plan's Stripe price is unique,
 		// so there is no same-price move to wave through either.
 		//
 		// No local state is taken as proof that the billing ended:
@@ -3853,6 +4043,37 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		// own answer behind it.
 		if locked.StripeSubscriptionID != "" && newPlan.ID != locked.PlanID {
 			return errStripeBilledPlanChange
+		}
+
+		// Nobody is removed by a change of plan, as in the portal's
+		// downgrade: with more people on or invited to the licence than
+		// the new plan seats, the room is freed first, rather than the
+		// members who joined last finding themselves paused. One that
+		// leaves a licence over a limit it was already over, but no
+		// further, goes ahead. A plan sold per seat takes the seats the
+		// licence holds: its people, within what the plan sells. Asked to
+		// "move" to the plan it is on, nothing changes: its seats are set
+		// where they are set, through Stripe or the quantity control.
+		used, err := store.CountInUseIn(ctx, tx, l.ID)
+		if err != nil {
+			return err
+		}
+		l.Quantity = locked.Quantity
+		if newPlan.PerSeat && newPlan.ID != locked.PlanID {
+			qty := locked.Quantity
+			if !fromPlan.PerSeat {
+				qty = used.People
+			}
+			qty = max(qty, newPlan.MinQuantity, 1)
+			if newPlan.MaxQuantity > 0 {
+				qty = min(qty, newPlan.MaxQuantity)
+			}
+			l.Quantity = qty
+		}
+		oldSeats, _ := fromPlan.Limits(locked.Quantity)
+		newSeats, _ := newPlan.Limits(l.Quantity)
+		if newSeats > 0 && used.People > newSeats && (oldSeats == 0 || newSeats < oldSeats) {
+			return &seatsInUseError{inUse: used.People, limit: newSeats}
 		}
 
 		// The maintenance period follows the license type. Leaving
@@ -3866,6 +4087,10 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		// of the old one is closed with it.
 		update := store.UpdateLicenseIn
 		cols := []string{"plan_id"}
+		if l.Quantity != locked.Quantity {
+			cols = append(cols, "quantity")
+			oldQuantity, newQuantity = locked.Quantity, l.Quantity
+		}
 		grantsPeriod := false
 		switch {
 		case newPlan.LicenseType != "perpetual":
@@ -3975,6 +4200,13 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		return store.SyncLicenseSubscriptionIn(ctx, tx, l.ID, newPlan, effectiveStatus, effectiveUntil)
 	})
 	if err != nil {
+		var seats *seatsInUseError
+		if errors.As(err, &seats) {
+			response.Conflict(c, "SEATS_IN_USE",
+				fmt.Sprintf("%d people are on or invited to this license; remove %d before moving it to a plan with %d seats", seats.inUse, seats.inUse-seats.limit, seats.limit),
+				gin.H{"in_use": seats.inUse, "seat_limit": seats.limit})
+			return
+		}
 		if errors.Is(err, errStripeBilledPlanChange) {
 			// Says what to do next, in order: the portal moves the
 			// subscription in Stripe as well, and cancelling alone is
@@ -4000,18 +4232,24 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		return
 	}
 
+	changes := changesWith(changesWith(
+		map[string]any{"old_plan_id": oldPlanID, "new_plan_id": req.PlanID},
+		"status", newStatus), "valid_until", newValidUntil)
+	if newQuantity != 0 {
+		changes["old_quantity"], changes["new_quantity"] = oldQuantity, newQuantity
+	}
 	h.Store.Audit(c, &model.AuditLog{
 		Entity: "license", EntityID: id, Action: "plan_changed",
 		ActorType: "admin", ActorID: adminID(c),
-		Changes: changesWith(changesWith(
-			map[string]any{"old_plan_id": oldPlanID, "new_plan_id": req.PlanID},
-			"status", newStatus), "valid_until", newValidUntil),
+		Changes: changes,
 	})
 
 	if h.Webhook != nil {
-		h.Webhook.Dispatch(c, l.ProductID, "plan.changed", map[string]any{
-			"license_id": id, "old_plan_id": oldPlanID, "new_plan_id": req.PlanID,
-		})
+		payload := map[string]any{"license_id": id, "old_plan_id": oldPlanID, "new_plan_id": req.PlanID}
+		if newQuantity != 0 {
+			payload["old_quantity"], payload["new_quantity"] = oldQuantity, newQuantity
+		}
+		h.Webhook.Dispatch(c, l.ProductID, "plan.changed", payload)
 	}
 
 	if h.Email != nil && l.Email != "" {

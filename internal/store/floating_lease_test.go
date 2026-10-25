@@ -79,7 +79,7 @@ func TestHeartbeatDoesNotReviveAnExpiredSession(t *testing.T) {
 		t.Fatalf("takeover checkout: %v", err)
 	}
 
-	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "laptop-a", time.Now().Add(time.Hour))
+	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "laptop-a", "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestHeartbeatUnknownIdentifier(t *testing.T) {
 	ctx := context.Background()
 	lic := floatingLicense(t, s, ctx)
 
-	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "never-checked-out", time.Now().Add(time.Hour))
+	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "never-checked-out", "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestHeartbeatExtendsALiveSession(t *testing.T) {
 		t.Fatalf("checkout: %v", err)
 	}
 	newExpiry := time.Now().Add(time.Hour)
-	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "laptop-a", newExpiry)
+	renewed, err := s.HeartbeatFloating(ctx, lic.ID, "laptop-a", "", newExpiry)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -290,8 +290,13 @@ func TestConcurrentCheckOutRespectsTheCap(t *testing.T) {
 	ctx := context.Background()
 	lic := floatingLicense(t, s, ctx)
 
-	// floatingLicense caps at 1; widen it for this one.
+	// floatingLicense caps at 1; widen it for this one. The store holds
+	// a checkout to the licence's own limit too, so the plan moves with
+	// the number passed in.
 	const max = 3
+	if _, err := s.DB.NewRaw("UPDATE plans SET max_activations = ? WHERE id = ?", max, lic.PlanID).Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
 	const contenders = 12
 	granted := make(chan bool, contenders)
 	var wg sync.WaitGroup

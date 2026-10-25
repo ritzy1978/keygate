@@ -53,18 +53,29 @@ func (s *FloatingService) CheckOut(ctx context.Context, in CheckOutInput) (*Chec
 	if timeout <= 0 {
 		timeout = 30
 	}
-	maxSessions := lic.Plan.MaxActivations
+	// Floating sessions are counted against the device limit: per seat
+	// on a plan sold that way.
+	_, maxSessions := lic.Limits()
 
 	expiresAt := time.Now().Add(time.Duration(timeout) * time.Minute)
 	sess := &model.FloatingSession{
 		LicenseID: lic.ID, Identifier: in.Identifier,
 		Label: in.Label, IPAddress: in.IPAddress, ExpiresAt: expiresAt,
+		SeatID: keySeatID(lic),
 	}
 
 	// Atomically check capacity and create/refresh session using DB-level locking
 	// This prevents race conditions where concurrent checkouts could exceed maxSessions
-	isNew, err := s.store.CheckOutFloatingWithLimit(ctx, sess, maxSessions)
+	isNew, err := s.store.CheckOutFloatingForKey(ctx, sess, maxSessions, in.LicenseKey)
 	if err != nil {
+		// Removed or replaced since it was looked up: a key that no
+		// longer exists.
+		if errors.Is(err, store.ErrKeyRevoked) {
+			return nil, licenseNotFound()
+		}
+		if errors.Is(err, store.ErrSessionHeld) {
+			return nil, apperr.Conflict("SESSION_HELD", "this machine's session was checked out with another key on this license")
+		}
 		if errors.Is(err, store.ErrFloatingLimitReached) {
 			active, _ := s.store.CountActiveFloating(ctx, lic.ID)
 			return nil, apperr.WithDetails(
@@ -91,7 +102,8 @@ func (s *FloatingService) CheckIn(ctx context.Context, licenseKey, identifier, p
 	if err != nil {
 		return err
 	}
-	if err := s.store.CheckInFloating(ctx, lic.ID, identifier); err != nil {
+	// A member's key ends only that member's session.
+	if err := s.store.CheckInFloating(ctx, lic.ID, identifier, keySeatID(lic)); err != nil {
 		return apperr.Internal(err)
 	}
 	s.logger.Info("floating checkin", "license_id", lic.ID, "identifier", identifier)
@@ -105,13 +117,10 @@ func (s *FloatingService) Heartbeat(ctx context.Context, licenseKey, identifier,
 	}
 
 	timeout := 30
-	maxSessions := 3
-	if lic.Plan != nil {
-		if lic.Plan.FloatingTimeout > 0 {
-			timeout = lic.Plan.FloatingTimeout
-		}
-		maxSessions = lic.Plan.MaxActivations
+	if lic.Plan != nil && lic.Plan.FloatingTimeout > 0 {
+		timeout = lic.Plan.FloatingTimeout
 	}
+	_, maxSessions := lic.Limits()
 
 	newExpiry := time.Now().Add(time.Duration(timeout) * time.Minute)
 	// A heartbeat that renewed nothing is the answer, not a silent
@@ -119,7 +128,8 @@ func (s *FloatingService) Heartbeat(ctx context.Context, licenseKey, identifier,
 	// lapsed while it was away and the slot has moved on. Both mean
 	// the same thing to the client, which is that it has to check out
 	// again before it may carry on.
-	renewed, err := s.store.HeartbeatFloating(ctx, lic.ID, identifier, newExpiry)
+	// A member's key renews only that member's session.
+	renewed, err := s.store.HeartbeatFloating(ctx, lic.ID, identifier, keySeatID(lic), newExpiry)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
