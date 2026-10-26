@@ -62,11 +62,27 @@ func TestLicenseExpiringTemplate_TrialWordingAndDaysLeft(t *testing.T) {
 		}))
 	}
 	trial, paid := render(true), render(false)
-	if !strings.Contains(trial, "Trial Expiring Soon") || !strings.Contains(trial, "days remaining: 3") {
+	if !strings.Contains(trial, "Trial Ending Soon") || !strings.Contains(trial, "days remaining: 3") {
 		t.Fatalf("trial wording wrong:\n%s", trial)
 	}
 	if !strings.Contains(paid, "License Expiring Soon") || strings.Contains(paid, "trial") {
 		t.Fatalf("license wording wrong:\n%s", paid)
+	}
+}
+
+// The end of a trial says what became of the licence: carried on with
+// the fallback plan, named and escaped, or ended.
+func TestTrialExpiredTemplate_FallbackPlan(t *testing.T) {
+	s := newTemplateTestService()
+	render := func(fallback string) string {
+		return renderTemplate(tmplTrialExpired, s.templateData(map[string]any{"Product": "Acme App", "FallbackPlan": fallback}))
+	}
+	moved, ended := render("Free <b>tier</b>"), render("")
+	if !strings.Contains(moved, "carries on with the <strong>Free &lt;b&gt;tier&lt;/b&gt;</strong> plan") || !strings.Contains(moved, "that plan's limits now apply") {
+		t.Fatalf("moved wording wrong or unescaped:\n%s", moved)
+	}
+	if strings.Contains(ended, "carries on") || !strings.Contains(ended, "Subscribe to a paid plan") {
+		t.Fatalf("ended wording wrong:\n%s", ended)
 	}
 }
 

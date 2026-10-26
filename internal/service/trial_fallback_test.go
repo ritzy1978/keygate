@@ -25,7 +25,7 @@ type mailCatcher struct {
 	got  []caughtMail
 }
 
-type caughtMail struct{ to, subject string }
+type caughtMail struct{ to, subject, body string }
 
 func newMailCatcher(t *testing.T) *mailCatcher {
 	t.Helper()
@@ -78,6 +78,7 @@ func (m *mailCatcher) serve(conn net.Conn) {
 				if s, ok := strings.CutPrefix(l, "Subject: "); ok && mail.subject == "" {
 					mail.subject = strings.TrimSpace(s)
 				}
+				mail.body += l
 			}
 			m.mu.Lock()
 			m.got = append(m.got, mail)
@@ -91,6 +92,18 @@ func (m *mailCatcher) serve(conn net.Conn) {
 			say("250 ok")
 		}
 	}
+}
+
+// body returns the raw message sent to addr, headers included.
+func (m *mailCatcher) body(addr string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, g := range m.got {
+		if g.to == addr {
+			return g.body
+		}
+	}
+	return ""
 }
 
 // to waits briefly for the mail sent to addr (the service sends from a
@@ -146,7 +159,7 @@ func newFallbackFixture(t *testing.T) *fallbackFixture {
 	// A webhook so the dispatches are recorded as deliveries. Its URL
 	// refuses connections; only the rows matter here.
 	f.webhook = &model.Webhook{ProductID: f.prod.ID, URL: "http://127.0.0.1:1/hook", Secret: "s",
-		Events: []string{model.EventPlanChanged, model.EventLicenseExpired}, Active: true}
+		Events: []string{model.EventPlanChanged, model.EventLicenseExpired, "license.deactivated"}, Active: true}
 	if err := s.CreateWebhook(ctx, f.webhook); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +248,7 @@ func (f *fallbackFixture) deliveries(lic *model.License, event string) int {
 
 // A trial whose plan names a fallback moves onto it when it ends: active,
 // no expiry, same key and activations, and the customer is told their
-// plan changed rather than that their trial expired.
+// trial ended and which plan they carry on with.
 func TestTrialFallback_MovesEndedTrial(t *testing.T) {
 	f := newFallbackFixture(t)
 	lic := f.license(f.trial)
@@ -268,12 +281,16 @@ func TestTrialFallback_MovesEndedTrial(t *testing.T) {
 			f.deliveries(lic, model.EventPlanChanged), f.deliveries(lic, model.EventLicenseExpired))
 	}
 	if n := f.count("SELECT count(*) FROM webhook_deliveries WHERE webhook_id = ? AND event = ? AND payload->'data'->>'license_id' = ? "+
-		"AND payload->'data'->>'reason' = 'trial_ended' AND payload->'data'->>'old_plan_id' = ? AND payload->'data'->>'new_plan_id' = ?",
-		f.webhook.ID, model.EventPlanChanged, lic.ID, f.trial.ID, f.free.ID); n != 1 {
-		t.Fatal("plan.changed payload lacks reason trial_ended or the old and new plan")
+		"AND payload->'data'->>'reason' = 'trial_ended' AND payload->'data'->>'old_plan_id' = ? AND payload->'data'->>'new_plan_id' = ? "+
+		"AND payload->'data'->>'email' = ?",
+		f.webhook.ID, model.EventPlanChanged, lic.ID, f.trial.ID, f.free.ID, lic.Email); n != 1 {
+		t.Fatal("plan.changed payload lacks reason trial_ended, the old and new plan, or the email")
 	}
-	if subjects := f.mail.to(lic.Email, 1); len(subjects) != 1 || subjects[0] != "Fallback App plan changed" {
-		t.Fatalf("mail sent: %q; want only the plan changed email", subjects)
+	if subjects := f.mail.to(lic.Email, 1); len(subjects) != 1 || subjects[0] != "Fallback App trial has ended" {
+		t.Fatalf("mail sent: %q; want only the trial ended email", subjects)
+	}
+	if body := f.mail.body(lic.Email); !strings.Contains(body, "carries on with the <strong>Community</strong> plan") {
+		t.Fatalf("the trial ended email does not name the fallback plan:\n%s", body)
 	}
 }
 
@@ -290,6 +307,9 @@ func TestTrialFallback_NoFallbackExpires(t *testing.T) {
 	}
 	if f.deliveries(lic, model.EventLicenseExpired) != 1 || f.deliveries(lic, model.EventPlanChanged) != 0 {
 		t.Fatal("want license.expired and no plan.changed")
+	}
+	if sub, err := f.s.FindSubscriptionByLicense(f.ctx, lic.ID); err != nil || sub.Status != model.StatusExpired {
+		t.Fatalf("subscription row %+v (%v); want it expired with the licence", sub, err)
 	}
 	if subjects := f.mail.to(lic.Email, 1); len(subjects) != 1 || subjects[0] != "Fallback App trial has ended" {
 		t.Fatalf("mail sent: %q; want only the trial expired email", subjects)
@@ -327,13 +347,102 @@ func TestTrialFallback_RepricedFallbackExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := f.s.MoveEndedTrialToFallback(f.ctx, lic.ID, time.Now())
+	// The store's answer, on a second licence: expired, with the reason.
+	other := f.license(f.trial)
+	res, err := f.s.MoveEndedTrialToFallback(f.ctx, other.ID, time.Now())
 	if err != nil || res.Moved || !res.Expire || !strings.Contains(res.Refusal, "free") {
 		t.Fatalf("got %+v, %v; want expire with a refusal naming the price", res, err)
 	}
+	if got := f.load(other); got.Status != model.StatusExpired {
+		t.Fatalf("the store answered expire but left the licence %s", got.Status)
+	}
+
 	f.c.endTrial(f.ctx, lic)
 	if got := f.load(lic); got.Status != model.StatusExpired || got.PlanID != f.trial.ID {
 		t.Fatalf("licence is %s on %s, want expired on its trial plan", got.Status, got.PlanID)
+	}
+	// Support finds why it expired rather than moved.
+	if n := f.eventually(1, "SELECT count(*) FROM audit_logs WHERE entity_id = ? AND action = 'expired' AND changes->>'fallback_refused' LIKE '%free%'",
+		lic.ID); n != 1 {
+		t.Fatalf("%d expired audits naming the refusal, want 1", n)
+	}
+}
+
+// A trial suspended after the sweep read it stays suspended: the move
+// re-reads the licence and takes only a trial still trialing, so it
+// neither moves it nor lifts the suspension.
+func TestTrialFallback_SuspendedSinceReadIsLeft(t *testing.T) {
+	f := newFallbackFixture(t)
+	lic := f.license(f.trial)
+	if _, err := f.s.DB.NewUpdate().Model((*model.License)(nil)).Set("status = ?", model.StatusSuspended).
+		Where("id = ?", lic.ID).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.c.endTrial(f.ctx, lic) // its copy still says trialing
+	if got := f.load(lic); got.Status != model.StatusSuspended || got.PlanID != f.trial.ID {
+		t.Fatalf("licence is %s on %s, want it suspended on its trial plan", got.Status, got.PlanID)
+	}
+	if f.deliveries(lic, model.EventPlanChanged) != 0 || f.deliveries(lic, model.EventLicenseExpired) != 0 {
+		t.Fatal("a suspended licence was announced as moved or expired")
+	}
+}
+
+// Replicas sweep at once: the trial moves once, with one announcement.
+func TestTrialFallback_ConcurrentSweepsMoveOnce(t *testing.T) {
+	f := newFallbackFixture(t)
+	lic := f.license(f.trial)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.c.endTrial(f.ctx, lic) // each with the same copy, as each replica read it
+		}()
+	}
+	wg.Wait()
+	if got := f.load(lic); got.Status != model.StatusActive || got.PlanID != f.free.ID {
+		t.Fatalf("licence is %s on %s, want active on the fallback", got.Status, got.PlanID)
+	}
+	if n := f.deliveries(lic, model.EventPlanChanged); n != 1 {
+		t.Fatalf("%d plan.changed deliveries, want 1", n)
+	}
+	if n := f.deliveries(lic, model.EventLicenseExpired); n != 0 {
+		t.Fatalf("%d license.expired deliveries, want 0", n)
+	}
+}
+
+// Devices already activated keep working after the move, as on any
+// downgrade: the fallback's limit holds new activations back instead.
+// Nothing is removed or reported as deactivated.
+func TestTrialFallback_KeepsDevicesOverTheLimit(t *testing.T) {
+	f := newFallbackFixture(t)
+	roomy := f.plan("Roomy Trial", "trial", f.free.ID)
+	if _, err := f.s.DB.NewUpdate().Model((*model.Plan)(nil)).Set("max_activations = 5").Where("id = ?", roomy.ID).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	lic := f.license(roomy) // with one device, room for five on the trial
+	for _, name := range []string{"second-pc", "third-pc"} {
+		if err := f.s.CreateActivation(f.ctx, &model.Activation{LicenseID: lic.ID, Identifier: name + "-" + lic.ID[:8], IdentifierType: "device"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f.c.endTrial(f.ctx, f.load(lic))
+
+	if got := f.load(lic); got.PlanID != f.free.ID {
+		t.Fatalf("licence on %s, want the fallback", got.PlanID)
+	}
+	if n := f.count("SELECT count(*) FROM activations WHERE license_id = ?", lic.ID); n != 3 {
+		t.Fatalf("%d devices after the move, want all 3 kept", n)
+	}
+	if n := f.deliveries(lic, "license.deactivated"); n != 0 {
+		t.Fatalf("%d license.deactivated deliveries, want none", n)
+	}
+	extra := &model.Activation{LicenseID: lic.ID, Identifier: "fourth-pc-" + lic.ID[:8], IdentifierType: "device"}
+	// The limit comes from the plan the licence is on now, read under its
+	// lock: the trial's five would let a fourth in.
+	if err := f.s.ActivateWithinLimit(f.ctx, extra, 100); err == nil {
+		t.Fatal("a new device was activated beyond the fallback's limit")
 	}
 }
 
@@ -410,6 +519,14 @@ func TestTrialFallback_ReminderWording(t *testing.T) {
 	if got := f.c.trialFallbackName(f.ctx, withFallback, false); got != "" {
 		t.Fatalf("fallback name %q for a licence that is not trialing", got)
 	}
+	// A fallback that no longer qualifies (priced by hand) is not promised.
+	if _, err := f.s.DB.NewUpdate().Model((*model.Plan)(nil)).Set("stripe_price_id = ?", "price_rem_"+f.suffix).
+		Where("id = ?", f.free.ID).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.c.trialFallbackName(f.ctx, withFallback, true); got != "" {
+		t.Fatalf("fallback name %q for a fallback that no longer qualifies", got)
+	}
 
 	e := newTemplateTestService()
 	_, moving := e.RenderLicenseExpiring("Acme", "KG-1", "2026-10-08", 3, true, "Community")
@@ -422,5 +539,85 @@ func TestTrialFallback_ReminderWording(t *testing.T) {
 	}
 	if err := ValidateTemplate(`<p>{{if .FallbackPlan}}Then {{.FallbackPlan}}{{end}}</p>`); err != nil {
 		t.Fatalf("a custom template using FallbackPlan was refused: %v", err)
+	}
+}
+
+// A move that fails leaves the trial as it was, trialing, for the next
+// sweep to try again: it is not expired in its place, and nothing is
+// announced.
+func TestTrialFallback_FailedMoveIsRetriedNotExpired(t *testing.T) {
+	f := newFallbackFixture(t)
+	lic := f.license(f.trial)
+	name := "block_move_" + f.suffix
+	if _, err := f.s.DB.NewRaw(`CREATE FUNCTION ` + name + `() RETURNS trigger AS $$
+		BEGIN IF NEW.id = '` + lic.ID + `' AND NEW.plan_id IS DISTINCT FROM OLD.plan_id THEN RAISE EXCEPTION 'blocked for the test'; END IF; RETURN NEW; END
+		$$ LANGUAGE plpgsql`).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.s.DB.NewRaw("DROP TRIGGER IF EXISTS " + name + " ON licenses").Exec(context.Background())
+		_, _ = f.s.DB.NewRaw("DROP FUNCTION IF EXISTS " + name + "()").Exec(context.Background())
+	})
+	if _, err := f.s.DB.NewRaw("CREATE TRIGGER " + name + " BEFORE UPDATE ON licenses FOR EACH ROW EXECUTE FUNCTION " + name + "()").Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	f.c.endTrial(f.ctx, lic)
+
+	if got := f.load(lic); got.Status != model.StatusTrialing || got.PlanID != f.trial.ID {
+		t.Fatalf("licence is %s on %s after a failed move, want trialing on its trial plan", got.Status, got.PlanID)
+	}
+	if f.deliveries(lic, model.EventPlanChanged) != 0 || f.deliveries(lic, model.EventLicenseExpired) != 0 {
+		t.Fatal("a failed move was announced")
+	}
+}
+
+// A trial that will move to a fallback is not read as expired before the
+// sweep moves it, even on a plan with no grace: it keeps a day. One with
+// no fallback, or billed by Stripe, ends on the plan's own grace.
+func TestTrialFallback_UsableUntilTheSweepMovesIt(t *testing.T) {
+	f := newFallbackFixture(t)
+	if _, err := f.s.DB.NewUpdate().Model((*model.Plan)(nil)).Set("grace_days = 0").
+		Where("id IN (?, ?)", f.trial.ID, f.bare.ID).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	moving, ending := f.load(f.license(f.trial)), f.load(f.license(f.bare)) // ended a minute ago
+	if err := LicenseUsable(moving); err != nil || !IsLicenseUsable(moving) {
+		t.Fatalf("a trial about to move to its fallback: %v, usable %v; want usable", err, IsLicenseUsable(moving))
+	}
+	if err := LicenseUsable(ending); err == nil || IsLicenseUsable(ending) {
+		t.Fatal("a trial with no fallback and no grace is still usable")
+	}
+	// A day, not more: past it the trial reads as expired after all.
+	dayAgo := time.Now().Add(-25 * time.Hour)
+	late := *moving
+	late.ValidUntil = &dayAgo
+	if err := LicenseUsable(&late); err == nil {
+		t.Fatal("a trial a day and more past its end is still usable")
+	}
+	// Only a trial gets it: once moved (active), the plan's own grace.
+	active := *moving
+	active.Status = model.StatusActive
+	if active.GraceDays() != 0 {
+		t.Fatalf("an active licence on the plan gets %d days of grace, want the plan's 0", active.GraceDays())
+	}
+	moving.StripeSubscriptionID = "sub_test"
+	if err := LicenseUsable(moving); err == nil {
+		t.Fatal("a Stripe-billed trial got the fallback's day of grace")
+	}
+}
+
+// A fallback named after the sweep read the plan is taken: the move is
+// decided under the locks, not on the sweep's copy.
+func TestTrialFallback_NamedSinceTheReadIsTaken(t *testing.T) {
+	f := newFallbackFixture(t)
+	lic := f.license(f.bare) // its copy: a plan with no fallback
+	if _, err := f.s.DB.NewUpdate().Model((*model.Plan)(nil)).Set("trial_fallback_plan_id = ?", f.free.ID).
+		Where("id = ?", f.bare.ID).Exec(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.c.endTrial(f.ctx, lic)
+	if got := f.load(lic); got.Status != model.StatusActive || got.PlanID != f.free.ID {
+		t.Fatalf("licence is %s on %s, want it moved to the fallback named since", got.Status, got.PlanID)
 	}
 }

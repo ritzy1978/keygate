@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -691,8 +692,9 @@ type TrialMove struct {
 	Moved bool
 	// Expire: the licence still qualifies for the trial sweep, but its
 	// plan names no fallback, or one that no longer qualifies (Refusal
-	// says why, for the log), or Stripe bills it. The caller expires it
-	// as it did before fallbacks existed.
+	// says why, for the log), or Stripe bills it. It was expired here,
+	// in the same transaction and under the same locks that decided it,
+	// as it was before fallbacks existed; the caller announces it.
 	Expire  bool
 	Refusal string
 	// FallbackPlanID is the plan the trial plan names, if any.
@@ -731,14 +733,26 @@ func (s *Store) MoveEndedTrialToFallback(ctx context.Context, id string, before 
 		if lic.Status != model.StatusTrialing || lic.ValidUntil == nil || !lic.ValidUntil.Before(before) {
 			return nil
 		}
-		from, err := FindPlanByIDIn(ctx, tx, lic.PlanID)
-		if err != nil {
+		// The trial plan held too (the licence, then its plan, then the
+		// fallback): a switch of its fallback either waits for this move
+		// or is what it reads, never a fallback it no longer names.
+		from := new(model.Plan)
+		if err := tx.NewSelect().Model(from).Where("id = ?", lic.PlanID).For("SHARE").Scan(ctx); err != nil {
 			return err
 		}
 		out.FallbackPlanID = from.TrialFallbackPlanID
+		// Expiring it is decided and done under these locks, so a fallback
+		// named after the decision cannot be expired past.
+		expire := func(refusal string) error {
+			out.Expire, out.Refusal = true, refusal
+			if _, err := tx.NewRaw("UPDATE licenses SET status = ?, updated_at = now() WHERE id = ?",
+				model.StatusExpired, lic.ID).Exec(ctx); err != nil {
+				return err
+			}
+			return syncSubscriptionStatus(ctx, tx, lic.ID, model.StatusExpired)
+		}
 		if from.TrialFallbackPlanID == "" || lic.StripeSubscriptionID != "" {
-			out.Expire = true
-			return nil
+			return expire("")
 		}
 		// FOR SHARE: blocks an edit of the fallback (a new price, a
 		// new type) until this write commits, without blocking the
@@ -746,15 +760,13 @@ func (s *Store) MoveEndedTrialToFallback(ctx context.Context, id string, before 
 		to := new(model.Plan)
 		err = tx.NewSelect().Model(to).Where("id = ?", from.TrialFallbackPlanID).For("SHARE").Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
-			out.Expire, out.Refusal = true, "plan not found"
-			return nil
+			return expire("plan not found")
 		}
 		if err != nil {
 			return err
 		}
 		if why := to.TrialFallbackRefusal(lic.ProductID); why != "" {
-			out.Expire, out.Refusal = true, why
-			return nil
+			return expire(why)
 		}
 		l := *lic
 		l.PlanID, l.Status, l.ValidUntil, l.UpdatesUntil = to.ID, model.StatusActive, nil, nil
@@ -993,6 +1005,81 @@ func (s *Store) ProductBlockers(ctx context.Context, productID string) (plans, l
 
 func (s *Store) PlanLicenseCount(ctx context.Context, planID string) (int, error) {
 	return PlanLicenseCountIn(ctx, s.DB, planID)
+}
+
+// TrialFallbackInUseError: trial plans name the plan as their fallback,
+// so it cannot stop being one they can move to, nor go.
+type TrialFallbackInUseError struct{ Plans []string }
+
+func (e *TrialFallbackInUseError) Error() string {
+	return "the fallback of trial plans " + strings.Join(e.Plans, ", ")
+}
+
+// TrialFallbackRefusedError: the plan named as a trial's fallback cannot
+// be one, as it reads under its lock; the message says why, worded as
+// the admin API's own check words it.
+type TrialFallbackRefusedError struct{ Msg string }
+
+func (e *TrialFallbackRefusedError) Error() string { return e.Msg }
+
+// GuardTrialFallbackTargetIn refuses with *TrialFallbackInUseError when
+// trial plans name planID as their fallback. The caller holds planID's
+// row lock (LockPlanIn), which a trial plan naming it waits on (see
+// LockTrialFallbackIn): either that write committed first and is seen
+// here, or it waits and then sees this one.
+func GuardTrialFallbackTargetIn(ctx context.Context, tx bun.IDB, planID string) error {
+	var names []string
+	err := tx.NewRaw("SELECT name FROM plans WHERE trial_fallback_plan_id = ? ORDER BY name", planID).Scan(ctx, &names)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if len(names) > 0 {
+		return &TrialFallbackInUseError{Plans: names}
+	}
+	return nil
+}
+
+// LockTrialFallbackIn takes a share lock on targetID, the plan a trial
+// plan of productID is to name as its fallback, and checks it can be
+// one as it reads under the lock: an edit or delete of the target holds
+// its row lock across its own check (GuardTrialFallbackTargetIn), so the
+// two never both pass.
+func LockTrialFallbackIn(ctx context.Context, tx bun.IDB, targetID, productID string) error {
+	target := new(model.Plan)
+	err := tx.NewSelect().Model(target).Where("id = ?", targetID).For("SHARE").Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &TrialFallbackRefusedError{Msg: "trial_fallback_plan_id: plan not found"}
+	}
+	if err != nil {
+		return err
+	}
+	if why := target.TrialFallbackRefusal(productID); why != "" {
+		return &TrialFallbackRefusedError{Msg: "trial_fallback_plan_id " + why}
+	}
+	return nil
+}
+
+// DeletePlanUnlessFallback deletes a plan, unless licences are on it
+// (ErrPlanHasLicenses) or trial plans name it as their fallback
+// (*TrialFallbackInUseError): the checks and the delete under the plan's
+// row lock, which a licence insert's foreign key waits on.
+func (s *Store) DeletePlanUnlessFallback(ctx context.Context, id string) error {
+	return RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		if err := LockPlanIn(ctx, tx, id); err != nil {
+			return err
+		}
+		n, err := PlanLicenseCountIn(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrPlanHasLicenses
+		}
+		if err := GuardTrialFallbackTargetIn(ctx, tx, id); err != nil {
+			return err
+		}
+		return deletedOne(tx.NewDelete().Model((*model.Plan)(nil)).Where("id = ?", id).Exec(ctx))
+	})
 }
 
 // PlanLicenseCountIn counts on a caller's transaction, for a writer

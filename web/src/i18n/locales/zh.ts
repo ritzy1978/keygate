@@ -16,6 +16,7 @@ const zh = {
   "common.search": "搜索",
   "common.filter": "筛选",
   "common.loading": "加载中...",
+  "common.listSeparator": "、",
   "common.pageRange": "第 {from}-{to} 条，共 {total} 条",
   "common.rowsPerPage": "每页",
   "common.noData": "暂无数据",
@@ -151,16 +152,30 @@ const zh = {
   "plans.notApplicableForType": "该产品类型不适用",
   "plans.trialDays": "试用天数",
   "plans.trialFallback": "试用结束后转到",
-  "plans.trialFallbackNone": "无（试用到期）",
-  "plans.trialFallbackNoLongerQualifies": "已不符合条件：试用将到期",
+  "plans.trialFallbackNone": "无（试用结束后直接过期）",
+  "plans.trialFallbackNoLongerQualifies": "已不符合条件：试用结束后将直接过期",
   "plans.trialFallbackHint":
-    "试用结束时，此方案的许可证将转到所选方案，并保留原有密钥和激活，而不是过期。只能选择此产品的免费方案。",
+    "试用结束时，此方案的许可证将转到所选方案，并保留原有密钥，而不是过期（在转移之前，无论宽限天数是多少，密钥在试用结束后至少还能用一天），之后按所选方案的限制执行。{devices}{seats}只能选择此产品中非试用、不按席位销售的免费方案。客户会收到试用已结束邮件（Trial Expired 模板），其中 {{.FallbackPlan}} 是所选方案的名称。",
+  "plans.trialFallbackHintDevices": "已激活的设备继续可用，但不能超出上限激活新设备。",
+  "plans.trialFallbackHintDevicesSeats":
+    "已激活的设备继续可用（被暂停成员的设备在恢复后可用），但不能超出上限激活新设备。",
+  "plans.trialFallbackHintSeats": "超出席位的成员会被暂停，最后加入的先暂停。",
+  "plans.trialFallbackInvalid":
+    "所选方案已不符合条件（现在有价格、更新期或续费，或者是试用方案），正在编辑的这个方案上的试用结束后会直接过期。请选择其他方案，或者选择“无”。",
+  "plans.trialFallbackNoneAvailableEdit":
+    "这个产品还没有可选的方案。请先创建一个免费方案（没有价格，不是试用，不按席位销售），再回来选择。",
+  "plans.trialFallbackNoneAvailable":
+    "这个产品还没有可选的方案。可以先保存这个方案，创建一个免费方案（没有价格，不是试用，不按席位销售）后，再编辑这个方案进行选择。",
+  "plans.trialFallbackTargetInUse":
+    "这个方案是以下试用方案的回退方案：{plans}。在此期间它必须保持免费，不能改成试用方案，也不能删除；请先在上述方案上改选其他回退方案。",
+  "plans.trialFallbackLoadFailed": "无法加载这个产品的方案。已保存的选择会保留；重新打开对话框即可修改。",
+  "plans.trialFallbackLoadFailedNew": "无法加载这个产品的方案，请稍后再试。",
   "plans.graceDays": "宽限天数",
   "plans.billingInterval": "计费周期",
   "plans.empty": "暂无方案",
   "plans.copyCheckoutLink": "复制购买链接",
   "plans.linkCopied": "购买链接已复制！",
-  "plans.deleteConfirm": "已有许可证的方案无法删除。",
+  "plans.deleteConfirm": "已有许可证或被试用方案用作回退方案的方案无法删除。",
   "plans.createTitle": "创建方案",
   "plans.editTitle": "编辑方案",
   "plans.formDesc": "配置方案详细信息。",
@@ -474,7 +489,7 @@ const zh = {
   "settings.reminderDaysInvalid": "请输入 1 到 {max} 之间的整数天数。",
   "settings.reminderDaysDuplicate": "{day}已在列表中。",
   "settings.reminderDaysMax": "最多 {max} 个提醒天数。",
-  "settings.reminderDaysSummary": "在许可证或试用到期前{list}发送。",
+  "settings.reminderDaysSummary": "在许可证到期或试用结束前{list}发送。",
   "settings.reminderDaysRules":
     "每个窗口只发一封：许可证首次进入较短的窗口时，只发该窗口的提醒。延期后会按新的到期日重新提醒。由 Stripe 自动续费订阅计费的许可证改为收到续费提醒。要停止这些提醒，请关闭该邮件开关。",
   "settings.reminderDaysOff": "邮件已关闭",
@@ -493,7 +508,7 @@ const zh = {
   "settings.autoEmailsGroup.status": "许可证状态",
   "settings.autoEmailsGroup.billing": "账单",
   "settings.autoEmailsGroup.usage": "用量与账户",
-  "settings.notify.license_expiring": "许可证或试用即将到期",
+  "settings.notify.license_expiring": "许可证即将到期或试用即将结束",
   "settings.notify.renewal_reminder": "订阅明天续费",
   "settings.notify.updates_ending": "更新期即将结束",
   "settings.notify.trial_ending": "Stripe 试用即将结束",
@@ -515,6 +530,12 @@ const zh = {
   "settings.templateSaved": "模板已保存。",
   "settings.templateReset": "已恢复默认模板。",
   "settings.templateDesc": "自定义邮件模板。使用 Go 模板语法：{{.Product}}、{{.Plan}}、{{.LicenseKey}} 等。",
+  "settings.templateFallbackNoteExpired":
+    "试用结束后转到回退方案的客户也会收到这封邮件。自定义的模板应当用 {{.FallbackPlan}} 写明那个方案；试用直接过期时它为空（预览按这种情况显示）。",
+  "settings.templateFallbackNoteExpiring":
+    "试用方案设置了回退方案时，这封提醒应当用 {{.FallbackPlan}} 写明会转到哪个方案（其他情况为空，预览按这种情况显示）。",
+  "settings.templatePreviewApprox":
+    "预览只支持简单的 {{if .字段}} 条件，这个模板中的部分内容只能近似显示，实际发送的邮件可能不同。",
   "settings.templatePreview": "预览",
   "settings.templateVariables": "可用变量",
   "settings.system": "系统",

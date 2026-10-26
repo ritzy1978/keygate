@@ -72,7 +72,7 @@ Free plans can take **self sign-up**: the plan's `/pay` link becomes a form wher
 
 A license on a free plan shows **Upgrade** in the portal: the customer pays for a paid plan of the same product through checkout, and that same license moves to it — same key, same activations, no re-install. A full refund, or the end of the subscription, puts it back on the free plan instead of revoking it.
 
-A trial plan can name a free plan to fall back to: when a trial ends, the license moves to that plan instead of expiring — same key, same activations — and the customer gets a plan-changed email rather than a trial-ended one.
+A trial plan can name a free plan to fall back to: when a trial ends, the license moves to that plan instead of expiring, with the same key, and the trial ended email tells the customer which plan they carry on with. That plan's limits then apply: devices already activated keep working (a paused member's once they are back) but no new ones can be activated beyond its limit, and members beyond its seats are paused.
 
 ### 👥 Seats & Entitlements
 

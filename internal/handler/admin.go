@@ -57,7 +57,8 @@ type AdminHandler struct {
 	// main like SubscriptionEnded, and nil without Stripe.
 	CancelSubscription func(ctx context.Context, lic *model.License) (reverted bool, err error)
 	// beforeCutoffWrite runs between reading a license (and the plan
-	// or product it points at) and the transaction that writes it.
+	// or product it points at), or the plans a plan write checks, and
+	// the transaction that writes it.
 	// Tests use it to commit a change in that window; nil everywhere
 	// else.
 	beforeCutoffWrite func()
@@ -137,12 +138,25 @@ func (h *AdminHandler) lockFeedGateIn(ctx context.Context, tx bun.Tx, productID 
 // createPlan and updatePlan write the plan, under the product's feed
 // gating lock when the plan sells an update period or renewals: the
 // gating state read before the write must still hold when it lands.
+//
+// A trial fallback the plan names is checked again under its lock (see
+// store.LockTrialFallbackIn), so an edit of that plan cannot slip in
+// between the check and the write.
 func (h *AdminHandler) createPlan(c *gin.Context, p *model.Plan, needsGatedFeed bool) error {
-	if !needsGatedFeed {
+	if !needsGatedFeed && p.TrialFallbackPlanID == "" {
 		return h.Store.CreatePlan(c, p)
 	}
 	h.Store.FillPlanIDs(p)
 	return h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		// Plans first, then the product, as everywhere.
+		if p.TrialFallbackPlanID != "" {
+			if err := store.LockTrialFallbackIn(ctx, tx, p.TrialFallbackPlanID, p.ProductID); err != nil {
+				return err
+			}
+		}
+		if !needsGatedFeed {
+			return store.CreatePlanIn(ctx, tx, p)
+		}
 		if problem, err := h.maintenanceSwitchOff(ctx, tx); err != nil || problem != nil {
 			return firstNonNil(err, problem)
 		}
@@ -223,11 +237,15 @@ func mergeTermsIn(ctx context.Context, tx bun.Tx, p *model.Plan, terms planTerms
 	return locked, changed, nil
 }
 
-func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed, typeChanged bool, terms planTermsRequest, cols []string) error {
+// fallback says what the write does to trial fallbacks: names a new one
+// (checked again under that plan's lock), or may make this plan stop
+// qualifying as one (refused, under this plan's lock, while trial plans
+// name it).
+func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed, typeChanged bool, terms planTermsRequest, cols []string, fallback planFallbackWrite) error {
 	if len(cols) == 0 {
 		return nil
 	}
-	if !needsGatedFeed && !typeChanged && !terms.carried() {
+	if !needsGatedFeed && !typeChanged && !terms.carried() && fallback == (planFallbackWrite{}) {
 		return h.Store.UpdatePlan(c, p, cols...)
 	}
 	return h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
@@ -237,8 +255,37 @@ func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed,
 		// the new type is committed and builds from that. Rows in the
 		// same order everywhere — plan, then product — and the gate
 		// after both.
+		// Two plans locked: this one, and the fallback it now names. In
+		// ID order, so two trial plans naming each other wait instead of
+		// deadlocking.
+		lockFallback := func() error {
+			if fallback.Names == "" {
+				return nil
+			}
+			return store.LockTrialFallbackIn(ctx, tx, fallback.Names, p.ProductID)
+		}
+		if fallback.Names != "" && fallback.Names < p.ID {
+			if err := lockFallback(); err != nil {
+				return err
+			}
+		}
 		if err := store.LockPlanIn(ctx, tx, p.ID); err != nil {
 			return err
+		}
+		if fallback.Names > p.ID {
+			if err := lockFallback(); err != nil {
+				return err
+			}
+		}
+		// Whether it qualifies as a fallback now, as it reads under the
+		// lock, not as the request's snapshot did.
+		var qualifiedBefore bool
+		if fallback.Guard {
+			before, err := store.FindPlanByIDIn(ctx, tx, p.ID)
+			if err != nil {
+				return err
+			}
+			qualifiedBefore = before.TrialFallbackRefusal(before.ProductID) == ""
 		}
 		if err := store.LockReferencedRowsIn(ctx, tx, "", p.ProductID); err != nil {
 			return err
@@ -287,8 +334,30 @@ func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed,
 				return problem
 			}
 		}
-		return store.UpdatePlanIn(ctx, tx, p, cols...)
+		if err := store.UpdatePlanIn(ctx, tx, p, cols...); err != nil {
+			return err
+		}
+		// The row as written: one that stopped qualifying as a fallback
+		// is rolled back if trial plans name it.
+		if fallback.Guard && qualifiedBefore {
+			after, err := store.FindPlanByIDIn(ctx, tx, p.ID)
+			if err != nil {
+				return err
+			}
+			if after.TrialFallbackRefusal(after.ProductID) != "" {
+				return store.GuardTrialFallbackTargetIn(ctx, tx, p.ID)
+			}
+		}
+		return nil
 	})
+}
+
+// planFallbackWrite: Names is the fallback an update newly names; Guard
+// is set when the update touches what makes a plan qualify as one (its
+// price, type or maintenance terms), decided again under the lock.
+type planFallbackWrite struct {
+	Names string
+	Guard bool
 }
 
 // changesWith adds a field to an audit entry when it has something to
@@ -1164,7 +1233,13 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		Active:               true,
 		SortOrder:            req.SortOrder,
 	}
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
+	}
 	if err := h.createPlan(c, p, needsGatedFeed); err != nil {
+		if trialFallbackRefused(c, err) {
+			return
+		}
 		if feedGateRefused(c, err) {
 			return
 		}
@@ -1178,6 +1253,11 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		}
 		if store.IsTrialFallbackPlanConflict(err) {
 			response.BadRequest(c, "trial_fallback_plan_id is only available on trial plans, and cannot be the plan itself")
+			return
+		}
+		if store.IsTrialFallbackMissing(err) {
+			// Deleted after it was checked.
+			response.BadRequest(c, "trial_fallback_plan_id: plan not found")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1206,6 +1286,7 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		response.NotFound(c, "plan not found")
 		return
 	}
+	stored := *p
 
 	var req struct {
 		Name                 *string `json:"name"`
@@ -1500,7 +1581,8 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	} else if licenseType != "trial" {
 		fallback = ""
 	}
-	if fallback != p.TrialFallbackPlanID || licenseType != p.LicenseType {
+	// Against the plan as stored: p already carries the request's type.
+	if fallback != stored.TrialFallbackPlanID || licenseType != stored.LicenseType {
 		if problem, err := h.trialFallbackProblem(c, p.ID, p.ProductID, licenseType, fallback); err != nil {
 			response.Internal(c, err)
 			return
@@ -1541,7 +1623,9 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		p.SignupConsentText = consentText
 		cols = append(cols, "signup_consent_text")
 	}
-	if fallback != p.TrialFallbackPlanID {
+	// Leaving the trial type clears it whatever the snapshot read: one
+	// named meanwhile would otherwise fail the write on the constraint.
+	if fallback != p.TrialFallbackPlanID || (req.LicenseType != nil && licenseType != "trial") {
 		p.TrialFallbackPlanID = fallback
 		cols = append(cols, "trial_fallback_plan_id")
 	}
@@ -1573,16 +1657,36 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		cols = append(cols, "min_quantity", "max_quantity")
 	}
 
-	if h.beforeCutoffWrite != nil {
-		h.beforeCutoffWrite()
-	}
+	// A plan that trial plans name as their fallback stays one they can
+	// move to: an edit that would make it refuse them (a price, an
+	// update period, a new type) is refused instead, rather than their
+	// trials quietly starting to expire. Decided in the write, under the
+	// plan's lock, on the row as it reads there.
 	terms := planTermsRequest{
 		UpdatesDays:          req.UpdatesDays,
 		RenewalDays:          req.RenewalDays,
 		StripeRenewalPriceID: req.StripeRenewalPriceID,
 		LicenseType:          req.LicenseType,
 	}
-	if err := h.updatePlan(c, p, needsGatedFeed, typeChanged, terms, cols); err != nil {
+	fallbackWrite := planFallbackWrite{
+		Guard: req.StripePriceID != nil || terms.carried(),
+	}
+	if p.TrialFallbackPlanID != stored.TrialFallbackPlanID {
+		fallbackWrite.Names = p.TrialFallbackPlanID
+	}
+
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
+	}
+	if err := h.updatePlan(c, p, needsGatedFeed, typeChanged, terms, cols, fallbackWrite); err != nil {
+		if trialFallbackRefused(c, err) {
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			// Deleted after this handler read it.
+			response.NotFound(c, "plan not found")
+			return
+		}
 		var invalid *invalidTermsError
 		if errors.As(err, &invalid) {
 			response.BadRequest(c, invalid.msg)
@@ -1606,6 +1710,11 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		}
 		if store.IsTrialFallbackPlanConflict(err) {
 			response.BadRequest(c, "trial_fallback_plan_id is only available on trial plans, and cannot be the plan itself")
+			return
+		}
+		if store.IsTrialFallbackMissing(err) {
+			// Deleted after it was checked.
+			response.BadRequest(c, "trial_fallback_plan_id: plan not found")
 			return
 		}
 		if feedGateConflict(c, err) {
@@ -1708,12 +1817,14 @@ func (h *AdminHandler) stripePriceTaken(c *gin.Context, priceID, exceptPlanID st
 
 func (h *AdminHandler) DeletePlan(c *gin.Context) {
 	id := c.Param("id")
-	count, _ := h.Store.PlanLicenseCount(c, id)
-	if count > 0 {
-		response.Err(c, http.StatusConflict, "HAS_LICENSES", "cannot delete plan with existing licenses")
-		return
-	}
-	if err := h.Store.DeletePlan(c, id); err != nil {
+	if err := h.Store.DeletePlanUnlessFallback(c, id); err != nil {
+		if errors.Is(err, store.ErrPlanHasLicenses) {
+			response.Err(c, http.StatusConflict, "HAS_LICENSES", "cannot delete plan with existing licenses")
+			return
+		}
+		if trialFallbackRefused(c, err) {
+			return
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			response.NotFound(c, "plan not found")
 			return
@@ -2165,6 +2276,34 @@ func (h *AdminHandler) trialFallbackProblem(c *gin.Context, planID, productID, l
 		return "trial_fallback_plan_id " + why, nil
 	}
 	return "", nil
+}
+
+// trialFallbackRefused answers what the trial fallback checks made under
+// lock refused, and reports whether it did: 409 TRIAL_FALLBACK_IN_USE,
+// naming the trial plans, for a plan they fall back to; 400 for a
+// fallback that cannot be one.
+func trialFallbackRefused(c *gin.Context, err error) bool {
+	var inUse *store.TrialFallbackInUseError
+	if errors.As(err, &inUse) {
+		quoted := make([]string, len(inUse.Plans))
+		for i, name := range inUse.Plans {
+			quoted[i] = strconv.Quote(name)
+		}
+		which := "trial plan " + quoted[0]
+		if len(quoted) > 1 {
+			which = "trial plans " + strings.Join(quoted, ", ")
+		}
+		response.Conflict(c, "TRIAL_FALLBACK_IN_USE",
+			"this plan is the fallback of "+which+"; while it is, it must stay free and cannot become a trial or be deleted",
+			gin.H{"plans": inUse.Plans})
+		return true
+	}
+	var refused *store.TrialFallbackRefusedError
+	if errors.As(err, &refused) {
+		response.BadRequest(c, refused.Error())
+		return true
+	}
+	return false
 }
 
 // validateScopes rejects unknown scope strings. Keeping the check at

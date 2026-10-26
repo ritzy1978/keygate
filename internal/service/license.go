@@ -622,10 +622,7 @@ func (s *LicenseService) maxActivations(lic *model.License) int {
 }
 
 func (s *LicenseService) graceDays(lic *model.License) int {
-	if lic.Plan != nil {
-		return lic.Plan.GraceDays
-	}
-	return 7
+	return lic.GraceDays()
 }
 
 // effectiveGraceDays is the grace this licence actually gets, which is

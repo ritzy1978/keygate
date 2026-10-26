@@ -42,7 +42,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { useI18n } from "@/i18n"
-import { admin, type Entitlement, errorCode, type Plan } from "@/lib/api"
+import { admin, type Entitlement, errorCode, errorDetails, type Plan } from "@/lib/api"
 
 // model.MaxPlanQuantity: the most seats a plan sold per seat can sell.
 const MAX_PLAN_QUANTITY = 10000
@@ -101,6 +101,14 @@ export default function PlansPage() {
     meta: { ownErrors: true },
     onError: (e: Error) => showToast(e.message, "error"),
   })
+  // A plan trial plans fall back to keeps qualifying: say which ones.
+  const planError = (e: Error) => {
+    if (errorCode(e) !== "TRIAL_FALLBACK_IN_USE") return e.message
+    const names = errorDetails(e)?.plans
+    return t("plans.trialFallbackTargetInUse", {
+      plans: Array.isArray(names) ? names.join(t("common.listSeparator")) : "",
+    })
+  }
   const updateMut = useMutation({
     mutationFn: ({ id, ...data }: Partial<Plan> & { id: string }) => admin.updatePlan(id, data),
     onSuccess: () => {
@@ -109,7 +117,7 @@ export default function PlansPage() {
     },
     meta: { ownErrors: true },
     onError: (e: Error) =>
-      showToast(errorCode(e) === "PER_SEAT_LOCKED" ? t("plans.perSeatLockedError") : e.message, "error"),
+      showToast(errorCode(e) === "PER_SEAT_LOCKED" ? t("plans.perSeatLockedError") : planError(e), "error"),
   })
   // A plan's limits apply to every license on it at once. Lowering
   // max_seats pauses the members who joined last on the licenses
@@ -148,7 +156,8 @@ export default function PlansPage() {
       setDeleting(null)
       showToast(t("toast.planDeleted"), "success")
     },
-    onError: (e: Error) => showToast(e.message, "error"),
+    meta: { ownErrors: true },
+    onError: (e: Error) => showToast(planError(e), "error"),
   })
 
   if (!isLoading && products.length === 0) {
@@ -481,7 +490,11 @@ function PlanDialog({
   // marked so the admin knows trials will expire instead (the sweep
   // re-checks the plan and does not move them).
   const isTrial = form.license_type === "trial"
-  const { data: siblingPlans } = useQuery({
+  const {
+    data: siblingPlans,
+    isLoading: siblingPlansLoading,
+    isError: siblingPlansFailed,
+  } = useQuery({
     queryKey: ["admin", "plans", "trial-fallback", form.product_id],
     queryFn: () => admin.listPlans({ product_id: form.product_id, limit: 100 }),
     enabled: isTrial && !!form.product_id,
@@ -489,6 +502,7 @@ function PlanDialog({
   const qualifiesAsFallback = (p: Plan) =>
     p.id !== plan?.id &&
     p.license_type !== "trial" &&
+    !p.per_seat &&
     !p.stripe_price_id &&
     !p.updates_days &&
     !p.renewal_days &&
@@ -496,6 +510,7 @@ function PlanDialog({
   const fallbackOptions = (siblingPlans?.plans ?? []).filter(
     (p) => p.id === form.trial_fallback_plan_id || qualifiesAsFallback(p),
   )
+  const selectedFallback = fallbackOptions.find((p) => p.id === form.trial_fallback_plan_id)
   const selectedProduct = plan?.product || pickedProduct
   const productType = selectedProduct?.type || "hybrid"
   const supports = {
@@ -768,28 +783,6 @@ function PlanDialog({
                   onChange={(e) => set("trial_days", Number(e.target.value))}
                 />
               </div>
-              {isTrial && (
-                <div className="space-y-2 sm:col-span-2">
-                  <Label>{t("plans.trialFallback")}</Label>
-                  <Select
-                    value={form.trial_fallback_plan_id || "none"}
-                    onValueChange={(v) => set("trial_fallback_plan_id", v === "none" ? "" : v)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">{t("plans.trialFallbackNone")}</SelectItem>
-                      {fallbackOptions.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {qualifiesAsFallback(p) ? p.name : `${p.name} (${t("plans.trialFallbackNoLongerQualifies")})`}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">{t("plans.trialFallbackHint")}</p>
-                </div>
-              )}
               <div className="space-y-2">
                 <Label>{t("plans.graceDays")}</Label>
                 <Input
@@ -800,6 +793,57 @@ function PlanDialog({
                   onChange={(e) => set("grace_days", Number(e.target.value))}
                 />
               </div>
+              {isTrial && (
+                <div className="space-y-2 sm:col-span-2">
+                  <Label>{t("plans.trialFallback")}</Label>
+                  <Select
+                    value={form.trial_fallback_plan_id || "none"}
+                    onValueChange={(v) => set("trial_fallback_plan_id", v === "none" ? "" : v)}
+                    // Editing, the saved choice stays as it is until its
+                    // options are known, rather than cleared unseen.
+                    disabled={!!plan && (siblingPlansLoading || siblingPlansFailed)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{t("plans.trialFallbackNone")}</SelectItem>
+                      {fallbackOptions.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name}
+                          {!p.active && ` (${t("common.inactive")})`}
+                          {!qualifiesAsFallback(p) && ` (${t("plans.trialFallbackNoLongerQualifies")})`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {siblingPlansLoading ? (
+                    <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
+                  ) : siblingPlansFailed ? (
+                    <p className="text-xs text-destructive">
+                      {t(plan ? "plans.trialFallbackLoadFailed" : "plans.trialFallbackLoadFailedNew")}
+                    </p>
+                  ) : selectedFallback && !qualifiesAsFallback(selectedFallback) ? (
+                    <p className="text-xs text-amber-700 dark:text-amber-400">{t("plans.trialFallbackInvalid")}</p>
+                  ) : siblingPlans && fallbackOptions.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {t(plan ? "plans.trialFallbackNoneAvailableEdit" : "plans.trialFallbackNoneAvailable")}
+                    </p>
+                  ) : (
+                    // What applies after the move, for what the product has.
+                    <p className="text-xs text-muted-foreground">
+                      {t("plans.trialFallbackHint", {
+                        devices: !supports.activations
+                          ? ""
+                          : t(
+                              supports.seats ? "plans.trialFallbackHintDevicesSeats" : "plans.trialFallbackHintDevices",
+                            ),
+                        seats: supports.seats ? t("plans.trialFallbackHintSeats") : "",
+                      })}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="space-y-2 flex items-center gap-3 pt-5">
                 <input
                   type="checkbox"

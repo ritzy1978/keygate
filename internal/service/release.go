@@ -1151,10 +1151,7 @@ func DownloadFilename(rel *model.Release, a *model.ReleaseArtifact) string {
 // gating. Exported so handlers can share the same check.
 func IsLicenseUsable(lic *model.License) bool {
 	now := time.Now()
-	graceDays := 7
-	if lic.Plan != nil {
-		graceDays = lic.Plan.GraceDays
-	}
+	graceDays := lic.GraceDays()
 	switch lic.Status {
 	case model.StatusActive, model.StatusTrialing, model.StatusPastDue:
 		if lic.ValidUntil == nil {

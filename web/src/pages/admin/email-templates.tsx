@@ -15,10 +15,13 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { useI18n } from "@/i18n"
+import { type TranslationKeys, useI18n } from "@/i18n"
 import { admin } from "@/lib/api"
 
-const TEMPLATE_META: Record<string, { label: string; variables: string[] }> = {
+// fallbackNote: trials that move, or will move, to their plan's fallback
+// plan get this email too, so a customised copy should name it with
+// {{.FallbackPlan}}; the key of the note that says so.
+const TEMPLATE_META: Record<string, { label: string; variables: string[]; fallbackNote?: TranslationKeys }> = {
   // SiteName and PortalURL are available in every template (see
   // EmailService.templateData); they are listed last on each.
   license_created: {
@@ -28,13 +31,18 @@ const TEMPLATE_META: Record<string, { label: string; variables: string[] }> = {
   license_expiring: {
     label: "License Expiring",
     variables: ["Product", "LicenseKey", "ExpiresAt", "DaysLeft", "IsTrial", "FallbackPlan", "SiteName", "PortalURL"],
+    fallbackNote: "settings.templateFallbackNoteExpiring",
   },
   updates_ending: {
     label: "Updates Ending",
     variables: ["Product", "LicenseKey", "UpdatesUntil", "SiteName", "PortalURL"],
   },
   license_expired: { label: "License Expired", variables: ["Product", "SiteName", "PortalURL"] },
-  trial_expired: { label: "Trial Expired", variables: ["Product", "SiteName", "PortalURL"] },
+  trial_expired: {
+    label: "Trial Expired",
+    variables: ["Product", "FallbackPlan", "SiteName", "PortalURL"],
+    fallbackNote: "settings.templateFallbackNoteExpired",
+  },
   license_suspended: { label: "License Suspended", variables: ["Product", "Reason", "SiteName", "PortalURL"] },
   quota_warning: {
     label: "Quota Warning",
@@ -61,24 +69,65 @@ const PREVIEW_DATA: Record<string, string> = {
   Reason: "Policy violation",
   DaysLeft: "3",
   IsTrial: "true",
-  FallbackPlan: "Free",
+  // Empty: most trials simply end, so that is what the preview shows.
+  FallbackPlan: "",
   DownloadURL: "https://example.com/download",
   InviteURL: "https://licenses.example.com/accept-invite?token=…",
   SiteName: "Acme Licensing",
   PortalURL: "https://licenses.example.com/portal",
 }
 
+// previewIsExact reports whether fillTemplate can follow every action in
+// src: fields, and {{if}} over fields (with "and"), {{else}} and {{end}}.
+// Anything else (not, or, with, else if, comparisons, trim markers) is
+// shown as an approximation, and the preview says so.
+function previewIsExact(src: string): boolean {
+  return [...tidyActions(src).matchAll(/\{\{([^}]*)\}\}/g)].every(([, action]) =>
+    /^(\.\w+|if (and )?\.\w+( \.\w+)*|else|end)$/.test(action),
+  )
+}
+
+// tidyActions writes {{ .Product }} as {{.Product}} and {{ if  .X }} as
+// {{if .X}}, as Go reads them the same; a trim marker ({{- or -}}) is
+// left alone, so the preview calls it approximate.
+function tidyActions(src: string): string {
+  return src.replace(/\{\{(\s*)([^{}]*?)(\s*)\}\}/g, (all, _lead, action: string) =>
+    action.startsWith("-") || action.endsWith("-") ? all : `{{${action.replace(/\s+/g, " ")}}}`,
+  )
+}
+
+// fillTemplate previews a template with PREVIEW_DATA. Each {{if}} takes
+// the branch the sample data picks, nested ones too: its first branch
+// when every .Field it names is set (and not "false"), else its {{else}}.
 function fillTemplate(html: string): string {
-  let result = html
+  const holds = (cond: string) =>
+    cond
+      .split(/\s+/)
+      .filter((word) => word.startsWith("."))
+      .every((ref) => {
+        const v = PREVIEW_DATA[ref.slice(1)]
+        return !!v && v !== "false"
+      })
+  const open: { shown: boolean; outer: boolean; held: boolean }[] = []
+  const shown = () => open.length === 0 || open[open.length - 1].shown
+  let result = ""
+  for (const part of tidyActions(html).split(/(\{\{if [^}]+\}\}|\{\{else\}\}|\{\{end\}\})/)) {
+    if (part.startsWith("{{if ")) {
+      const outer = shown()
+      const held = holds(part.slice(5, -2))
+      open.push({ shown: outer && held, outer, held })
+    } else if (part === "{{else}}" && open.length > 0) {
+      const top = open[open.length - 1]
+      top.shown = top.outer && !top.held
+    } else if (part === "{{end}}" && open.length > 0) {
+      open.pop()
+    } else if (shown()) {
+      result += part
+    }
+  }
   for (const [k, v] of Object.entries(PREVIEW_DATA)) {
     result = result.replaceAll(`{{.${k}}}`, v)
   }
-  // Preview the "true" side of each conditional: drop {{else}} branches,
-  // then the {{if}}/{{end}} markers (the defaults never nest them).
-  result = result
-    .replace(/\{\{else\}\}[\s\S]*?\{\{end\}\}/g, "")
-    .replace(/\{\{if [^}]+\}\}/g, "")
-    .replace(/\{\{end\}\}/g, "")
   return result
 }
 
@@ -166,6 +215,11 @@ export default function EmailTemplatesManager() {
                         <div className="text-xs text-muted-foreground mt-0.5">
                           {meta.variables.map((v) => `{{.${v}}}`).join(", ")}
                         </div>
+                        {isCustomized && meta.fallbackNote && !tmpl?.custom?.includes(".FallbackPlan") && (
+                          <div className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                            {t(meta.fallbackNote)}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
@@ -222,6 +276,11 @@ export default function EmailTemplatesManager() {
                 {t("settings.templateVariables")}:{" "}
                 {editing && TEMPLATE_META[editing]?.variables.map((v) => `{{.${v}}}`).join(", ")}
               </div>
+              {editing && TEMPLATE_META[editing]?.fallbackNote && !editValue.includes(".FallbackPlan") && (
+                <div className="text-xs text-amber-700 dark:text-amber-400">
+                  {t(TEMPLATE_META[editing].fallbackNote as TranslationKeys)}
+                </div>
+              )}
               <textarea
                 className="w-full h-64 font-mono text-xs p-3 border rounded-lg bg-muted/50 resize-y focus:outline-none focus:ring-2 focus:ring-primary"
                 value={editValue}
@@ -252,6 +311,9 @@ export default function EmailTemplatesManager() {
             </DialogTitle>
           </DialogHeader>
           <DialogBody>
+            {previewing && !previewIsExact(templates[previewing]?.custom || templates[previewing]?.default || "") && (
+              <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">{t("settings.templatePreviewApprox")}</p>
+            )}
             {previewing && (
               <iframe
                 title="Email Preview"

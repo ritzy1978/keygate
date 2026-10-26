@@ -16,6 +16,7 @@ const en = {
   "common.search": "Search",
   "common.filter": "Filter",
   "common.loading": "Loading...",
+  "common.listSeparator": ", ",
   "common.pageRange": "{from}-{to} of {total}",
   "common.rowsPerPage": "Rows",
   "common.noData": "No data",
@@ -162,13 +163,29 @@ const en = {
   "plans.trialFallbackNone": "Nothing (the trial expires)",
   "plans.trialFallbackNoLongerQualifies": "no longer qualifies: trials will expire",
   "plans.trialFallbackHint":
-    "Licenses on this plan move to the chosen plan when their trial ends, keeping their key and activations, instead of expiring. Only free plans of this product can be chosen.",
+    "Licenses on this plan move to the chosen plan when their trial ends, keeping their key, instead of expiring (until the move, the key keeps working at least a day past the trial's end, whatever the grace days), and the chosen plan's limits then apply.{devices}{seats} Only free plans of this product that are not trials or sold per seat can be chosen. Customers get the trial ended email (the Trial Expired template), where {{.FallbackPlan}} names the plan.",
+  "plans.trialFallbackHintDevices":
+    " Devices already activated keep working, but no new ones can be activated beyond its limit.",
+  "plans.trialFallbackHintDevicesSeats":
+    " Devices already activated keep working (a paused member's once they are back), but no new ones can be activated beyond its limit.",
+  "plans.trialFallbackHintSeats": " Members beyond its seats are paused, the last to join first.",
+  "plans.trialFallbackInvalid":
+    "The chosen plan no longer qualifies (it now has a price, an update period or renewals, or is a trial plan), so trials on the plan you are editing will expire. Choose another plan, or Nothing.",
+  "plans.trialFallbackNoneAvailableEdit":
+    "No plan of this product can be chosen yet. Create a free plan (no price, not a trial, not sold per seat), then come back and choose it.",
+  "plans.trialFallbackNoneAvailable":
+    "No plan of this product can be chosen yet. Save this plan, create a free plan (no price, not a trial, not sold per seat), then edit this plan to choose it.",
   "plans.graceDays": "Grace Days",
+  "plans.trialFallbackTargetInUse":
+    "This plan is the trial fallback of: {plans}. While it is, it must stay free and cannot become a trial or be deleted; choose another fallback there first.",
+  "plans.trialFallbackLoadFailed":
+    "Couldn't load this product's plans. The saved choice is kept; reopen the dialog to change it.",
+  "plans.trialFallbackLoadFailedNew": "Couldn't load this product's plans. Try again in a moment.",
   "plans.billingInterval": "Billing Interval",
   "plans.empty": "No plans yet",
   "plans.copyCheckoutLink": "Copy checkout link",
   "plans.linkCopied": "Checkout link copied!",
-  "plans.deleteConfirm": "Plans with existing licenses cannot be deleted.",
+  "plans.deleteConfirm": "Plans with existing licenses, or that trial plans fall back to, cannot be deleted.",
   "plans.createTitle": "Create Plan",
   "plans.editTitle": "Edit Plan",
   "plans.formDesc": "Configure the plan details.",
@@ -494,7 +511,7 @@ const en = {
   "settings.reminderDaysInvalid": "Enter a whole number of days from 1 to {max}.",
   "settings.reminderDaysDuplicate": "{day} is already in the list.",
   "settings.reminderDaysMax": "Up to {max} reminder days.",
-  "settings.reminderDaysSummary": "Sent {list} before the license or trial expires.",
+  "settings.reminderDaysSummary": "Sent {list} before the license expires or the trial ends.",
   "settings.reminderDaysRules":
     "One email per window: a license that first comes within a shorter window gets only that window's reminder. An extended license is reminded again for its new date. Licenses billed by a Stripe subscription that renews get the renewal reminder instead. To stop these reminders, turn the email off.",
   "settings.reminderDaysOff": "email is off",
@@ -514,7 +531,7 @@ const en = {
   "settings.autoEmailsGroup.status": "License status",
   "settings.autoEmailsGroup.billing": "Billing",
   "settings.autoEmailsGroup.usage": "Usage and account",
-  "settings.notify.license_expiring": "License or trial expiring soon",
+  "settings.notify.license_expiring": "License expiring or trial ending soon",
   "settings.notify.renewal_reminder": "Subscription renews tomorrow",
   "settings.notify.updates_ending": "Update period ending soon",
   "settings.notify.trial_ending": "Stripe trial ending soon",
@@ -537,6 +554,12 @@ const en = {
   "settings.templateReset": "Template reset to default.",
   "settings.templateDesc":
     "Customize email templates. Use Go template syntax: {{.Product}}, {{.Plan}}, {{.LicenseKey}}, etc.",
+  "settings.templateFallbackNoteExpired":
+    "This email also goes to customers whose trial moves to its plan's fallback plan. A customized copy should name that plan with {{.FallbackPlan}}, which is empty when the trial simply expires (as in the preview).",
+  "settings.templateFallbackNoteExpiring":
+    "For a trial whose plan names a fallback plan, this reminder should say where it moves, with {{.FallbackPlan}} (empty otherwise, as in the preview).",
+  "settings.templatePreviewApprox":
+    "This preview follows simple {{if .Field}} conditions only; parts of this template are shown approximately. The email as sent may differ.",
   "settings.templatePreview": "Preview",
   "settings.templateVariables": "Variables",
   "settings.system": "System",

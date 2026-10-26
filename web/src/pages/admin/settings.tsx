@@ -79,7 +79,8 @@ const EMAIL_NOTIFY_KEYS: EmailNotifyKey[] = EMAIL_NOTIFY_GROUPS.flatMap((g) => g
 // the customer cancels, license.canceled only when the period ends.)
 const EMAIL_NOTIFY_WEBHOOK: Partial<Record<EmailNotifyKind, string>> = {
   license_expired: "license.expired",
-  trial_expired: "license.expired",
+  // A trial that moves to its plan's fallback gets this email too.
+  trial_expired: "license.expired, plan.changed (trial_ended)",
   license_suspended: "license.suspended",
   plan_changed: "plan.changed",
   payment_failed: "license.payment_failed",

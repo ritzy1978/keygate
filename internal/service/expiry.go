@@ -180,80 +180,56 @@ func (c *ExpiryChecker) ExpireTrials(ctx context.Context) {
 // or marked expired. The licence is re-checked in the write, so a stale
 // copy is harmless.
 func (c *ExpiryChecker) endTrial(ctx context.Context, lic *model.License) {
-	now := time.Now()
-	if c.moveEndedTrial(ctx, lic, now) {
-		return
-	}
-	ok, err := c.store.ExpireLicenseIf(ctx, lic.ID, []string{model.StatusTrialing}, &now)
+	// Decided and done under the locks, not on this read: a fallback named
+	// since the sweep read the plan is taken, not expired past.
+	res, err := c.store.MoveEndedTrialToFallback(ctx, lic.ID, time.Now())
 	if err != nil {
-		c.logger.Error("expire trial failed", "id", lic.ID, "error", err)
+		// Left trialing: the next sweep tries again rather than expiring
+		// a licence that was meant to move.
+		c.logger.Error("trial end failed; retried next sweep", "id", lic.ID, "error", err)
 		return
 	}
-	if !ok {
-		return // extended or changed since it was read
-	}
-	lic.Status = model.StatusExpired
-	c.store.Audit(ctx, &model.AuditLog{
-		Entity: "license", EntityID: lic.ID, Action: "expired",
-		ActorType: "system",
-		Changes:   map[string]any{"reason": "trial_ended"},
-	})
-	c.webhook.Dispatch(ctx, lic.ProductID, "license.expired", map[string]any{
-		"license_id": lic.ID, "email": lic.Email, "reason": "trial_ended",
-	})
 	productName := ""
 	if lic.Product != nil {
 		productName = lic.Product.Name
 	}
-	c.email.SendTrialExpired(lic.Email, productName)
-	c.logger.Info("trial expired", "id", lic.ID)
-}
-
-// moveEndedTrial moves lic, whose trial has ended, onto the fallback
-// plan its trial plan names, and reports whether the sweep is done with
-// it: moved, changed since it was read, or failed (left trialing, so
-// the next sweep tries again rather than expiring a licence that was
-// meant to move). false means expire it as before: no fallback, or one
-// that no longer qualifies.
-func (c *ExpiryChecker) moveEndedTrial(ctx context.Context, lic *model.License, now time.Time) bool {
-	// The read already shows no fallback: skip the transaction. A
-	// fallback set since then is picked up by the next trial to end.
-	if lic.Plan != nil && lic.Plan.TrialFallbackPlanID == "" {
-		return false
-	}
-	res, err := c.store.MoveEndedTrialToFallback(ctx, lic.ID, now)
-	if err != nil {
-		c.logger.Error("trial fallback move failed; retried next sweep", "id", lic.ID, "error", err)
-		return true
-	}
-	if res.Expire {
+	switch {
+	case res.Moved:
+		c.store.Audit(ctx, &model.AuditLog{
+			Entity: "license", EntityID: lic.ID, Action: "plan_changed",
+			ActorType: "system",
+			Changes: map[string]any{
+				"reason": "trial_ended", "old_plan_id": res.From.ID, "new_plan_id": res.To.ID,
+				"status": model.StatusActive, "valid_until": "cleared",
+			},
+		})
+		c.webhook.Dispatch(ctx, lic.ProductID, model.EventPlanChanged, map[string]any{
+			"license_id": lic.ID, "email": lic.Email, "old_plan_id": res.From.ID, "new_plan_id": res.To.ID, "reason": "trial_ended",
+		})
+		c.email.SendTrialExpired(lic.Email, productName, res.To.Name)
+		c.logger.Info("trial ended; moved to fallback plan", "id", lic.ID, "plan_id", res.To.ID)
+	case res.Expire:
+		changes := map[string]any{"reason": "trial_ended"}
 		if res.Refusal != "" {
-			c.logger.Warn("trial fallback plan no longer qualifies; the trial expires instead",
+			// The plan named a fallback that no longer qualifies: said
+			// here, where support looks for why a trial expired.
+			changes["fallback_refused"] = res.Refusal
+			c.logger.Warn("trial fallback plan no longer qualifies; the trial expired instead",
 				"id", lic.ID, "fallback_plan_id", res.FallbackPlanID, "reason", res.Refusal)
 		}
-		return false
+		lic.Status = model.StatusExpired
+		c.store.Audit(ctx, &model.AuditLog{
+			Entity: "license", EntityID: lic.ID, Action: "expired",
+			ActorType: "system",
+			Changes:   changes,
+		})
+		c.webhook.Dispatch(ctx, lic.ProductID, "license.expired", map[string]any{
+			"license_id": lic.ID, "email": lic.Email, "reason": "trial_ended",
+		})
+		c.email.SendTrialExpired(lic.Email, productName, "")
+		c.logger.Info("trial expired", "id", lic.ID)
 	}
-	if !res.Moved {
-		return true // extended, moved or reinstated since it was read
-	}
-	c.store.Audit(ctx, &model.AuditLog{
-		Entity: "license", EntityID: lic.ID, Action: "plan_changed",
-		ActorType: "system",
-		Changes: map[string]any{
-			"reason": "trial_ended", "old_plan_id": res.From.ID, "new_plan_id": res.To.ID,
-			"status": model.StatusActive, "valid_until": "cleared",
-		},
-	})
-	c.webhook.Dispatch(ctx, lic.ProductID, model.EventPlanChanged, map[string]any{
-		"license_id": lic.ID, "old_plan_id": res.From.ID, "new_plan_id": res.To.ID, "reason": "trial_ended",
-	})
-	productName := ""
-	if lic.Product != nil {
-		productName = lic.Product.Name
-	}
-	c.email.SendPlanChanged(lic.Email, productName, res.From.Name, res.To.Name)
-	c.logger.Info("trial ended; moved to fallback plan", "id", lic.ID, "plan_id", res.To.ID)
-	return true
+	// Otherwise extended, moved or reinstated since it was read.
 }
 
 // MarkPastDueAsExpired converts long-standing past_due licenses to expired.

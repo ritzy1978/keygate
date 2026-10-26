@@ -5592,7 +5592,19 @@ webhooks:
         plan and `plan.changed` is sent instead. Likewise a trial whose
         plan names a fallback plan (`trial_fallback_plan_id`) is not
         expired when it runs out: it moves to that plan and
-        `plan.changed` is sent with `reason: trial_ended`.
+        `plan.changed` is sent with `reason: trial_ended`; devices
+        already activated keep working (a paused member's once they are
+        back), new ones are held to that plan's limit, and members
+        beyond its seats are paused. Until the hourly sweep moves it,
+        its key keeps working for at least a day past the trial's end,
+        whatever the plan's grace days (an offline token issued then can
+        carry the trial's features until that day is out). Add-ons on
+        the license stay, as on any plan change. It still expires, with
+        this event, should the fallback ever stop qualifying (the admin
+        API refuses edits that would do that, so only a direct database
+        change can), or when a Stripe subscription bills the trial: that
+        one is Stripe's to settle, and expires only if nothing is heard
+        past the plan's grace days.
       parameters:
         - $ref: "#/components/parameters/WebhookEventHeader"
         - $ref: "#/components/parameters/WebhookSignatureHeader"
@@ -5986,6 +5998,9 @@ webhooks:
                       type: object
                       properties:
                         license_id: { type: string, format: uuid }
+                        email:
+                          type: string
+                          description: The license's email, with `reason` `trial_ended`
                         old_plan_id: { type: string, format: uuid }
                         new_plan_id: { type: string, format: uuid }
                         old_quantity:
@@ -6494,7 +6509,7 @@ components:
                 | `iat`, `exp` | issued at; how long the client may stay offline before verifying again. `exp` is a check-in interval, not the license term, and never later than `vun` plus grace |
                 | `vun` | when the license itself lapses; absent = no expiry |
                 | `upd` | end of the maintenance period: install only releases published at or before this instant; absent = no separate limit |
-                | `grc` | grace days after `vun` |
+                | `grc` | grace days after `vun` (at least 1 for a trial whose plan names a fallback plan and that Stripe does not bill, until it moves) |
                 | `nce` | per-issuance nonce |
 
                 A client that ships updates through its own channel
@@ -6503,7 +6518,7 @@ components:
                 the same rule when given the license token or key.
             grace_days:
               type: integer
-              description: Grace days after `valid_until`; 0 for a canceled license.
+              description: Grace days after `valid_until`; 0 for a canceled license; at least 1 for a trial whose plan names a fallback plan (`trial_fallback_plan_id`) and that Stripe does not bill, until it moves.
             external_customer_id:
               type: string
               description: Echoed when the license was created with one, so the client can check it belongs to the expected customer. Absent otherwise.

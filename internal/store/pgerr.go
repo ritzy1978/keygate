@@ -51,6 +51,14 @@ func IsForeignKeyViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Field('C') == "23503"
 }
 
+// IsTrialFallbackMissing reports whether err is the foreign key on
+// plans.trial_fallback_plan_id: the plan named as a trial's fallback
+// does not exist (deleted after it was checked).
+func IsTrialFallbackMissing(err error) bool {
+	var pgErr pgdriver.Error
+	return errors.As(err, &pgErr) && pgErr.Field('C') == "23503" && pgErr.Field('n') == "plans_trial_fallback_plan_id_fkey"
+}
+
 // deletedOne turns a delete that matched no row into sql.ErrNoRows, so a
 // handler can answer 404 for an id that does not exist instead of 204.
 func deletedOne(res sql.Result, err error) error {

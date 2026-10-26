@@ -31,7 +31,7 @@ var ToggleableEmails = []string{
 	"trial_ending",
 	// License status changes
 	"license_expired",
-	"trial_expired",
+	"trial_expired", // also a trial moved to its fallback plan
 	"license_suspended",
 	"subscription_canceled",
 	"plan_changed",
